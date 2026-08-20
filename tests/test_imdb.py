@@ -7,6 +7,7 @@ shipped. The fetcher tests are about the contract an operator has to implement.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import httpx2
@@ -17,6 +18,7 @@ from app.providers.imdb import ImdbTechnicalProvider, parse_technical
 from tests.support import Handler, fixture, make_settings, mock_client, recording_handler, run
 
 FETCHER_URL = "https://fetcher.example/get"
+BROWSERLESS_URL = "http://192.168.1.2:3579/content"
 TECHNICAL_URL = "https://www.imdb.com/title/tt0083658/technical/"
 
 
@@ -273,6 +275,106 @@ def test_a_transport_failure_names_the_kind() -> None:
 
     assert caught.value.message == "Could not reach the IMDb fetcher."
     assert caught.value.detail == "ReadTimeout"
+
+
+# --- the fetcher: browserless ------------------------------------------------
+
+
+def sent_body(request: httpx2.Request) -> dict[str, Any]:
+    payload: Any = json.loads(request.content)
+    assert isinstance(payload, dict)
+    return payload
+
+
+def test_a_browserless_url_is_posted_to_with_the_target_in_the_body() -> None:
+    handler, seen = recording_handler(httpx2.Response(200, text="<html>page</html>"))
+    client = provider(handler, imdb_fetcher_url=BROWSERLESS_URL)
+
+    assert run(client.fetch("tt0083658")) == "<html>page</html>"
+
+    request = seen[0]
+    # browserless serves HTML on POST-with-a-body only. There is no ?url= route on it
+    # to configure, so recognising the endpoint is the app's job.
+    assert request.method == "POST"
+    assert str(request.url) == BROWSERLESS_URL
+    assert request.headers["content-type"] == "application/json"
+    assert sent_body(request)["url"] == TECHNICAL_URL
+
+
+def test_browserless_waits_for_the_document_rather_than_for_the_ad_trackers() -> None:
+    handler, seen = recording_handler(httpx2.Response(200, text="<html>page</html>"))
+    client = provider(handler, imdb_fetcher_url=BROWSERLESS_URL, imdb_fetcher_timeout_seconds=20.0)
+
+    run(client.fetch("tt0083658"))
+
+    goto = sent_body(seen[0])["gotoOptions"]
+    # __NEXT_DATA__ is in the initial HTML; networkidle would only wait for IMDb's ads.
+    assert goto["waitUntil"] == "domcontentloaded"
+    # 90% of the HTTP timeout, in ms: Chrome reports the failure rather than having the
+    # connection cut from under it.
+    assert goto["timeout"] == 18_000
+
+
+def test_a_bare_host_and_port_means_the_content_endpoint() -> None:
+    # How anyone writes their instance down: the port, and nothing after it.
+    handler, seen = recording_handler(httpx2.Response(200, text="<html>page</html>"))
+
+    run(provider(handler, imdb_fetcher_url="http://192.168.1.2:3579").fetch("tt0083658"))
+
+    assert str(seen[0].url) == BROWSERLESS_URL
+
+
+def test_browserless_takes_its_token_in_the_query_string_as_well() -> None:
+    handler, seen = recording_handler(httpx2.Response(200, text="<html>page</html>"))
+    client = provider(handler, imdb_fetcher_url=BROWSERLESS_URL, imdb_fetcher_token="s3cret")
+
+    run(client.fetch("tt0083658"))
+
+    # v1 reads only ?token=, v2 reads either, and a reverse proxy in front may want the
+    # header — so both carry it.
+    assert dict(seen[0].url.params)["token"] == "s3cret"
+    assert seen[0].headers["authorization"] == "Bearer s3cret"
+
+
+def test_the_unblock_endpoint_is_asked_for_content_and_unwrapped() -> None:
+    handler, seen = recording_handler(
+        httpx2.Response(200, json={"content": "<html>page</html>", "cookies": [], "ttl": 0})
+    )
+    client = provider(handler, imdb_fetcher_url="http://192.168.1.2:3579/unblock")
+
+    assert run(client.fetch("tt0083658")) == "<html>page</html>"
+
+    # /unblock drives the stealth browser and answers in JSON; it takes no gotoOptions.
+    assert sent_body(seen[0]) == {"url": TECHNICAL_URL, "content": True}
+
+
+def test_a_query_string_already_on_the_fetcher_url_survives() -> None:
+    handler, seen = recording_handler(httpx2.Response(200, text="<html>page</html>"))
+
+    run(provider(handler, imdb_fetcher_url=f"{FETCHER_URL}?api_key=k").fetch("tt0083658"))
+
+    assert dict(seen[0].url.params) == {"api_key": "k", "url": TECHNICAL_URL}
+
+
+@pytest.mark.parametrize(
+    ("mode", "url", "method"),
+    [
+        ("auto", BROWSERLESS_URL, "POST"),
+        ("auto", FETCHER_URL, "GET"),
+        # When the endpoint name guesses wrong, the setting decides.
+        ("query", BROWSERLESS_URL, "GET"),
+        ("browserless", FETCHER_URL, "POST"),
+    ],
+)
+def test_the_mode_setting_overrides_the_endpoint_name(mode: str, url: str, method: str) -> None:
+    handler, seen = recording_handler(httpx2.Response(200, text="<html>page</html>"))
+    client = provider(handler, imdb_fetcher_url=url, imdb_fetcher_mode=mode)
+
+    run(client.fetch("tt0083658"))
+
+    assert seen[0].method == method
+    # The target travels in the query string one way and in the body the other.
+    assert ("url" in dict(seen[0].url.params)) == (method == "GET")
 
 
 def test_fetch_specs_parses_and_caches() -> None:

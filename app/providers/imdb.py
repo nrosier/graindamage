@@ -6,7 +6,8 @@ it. Two routes in:
 1. **Paste** the page source. Always available, needs no configuration, and is the
    documented path.
 2. **Fetch** through a service the operator controls (``IMDB_FETCHER_URL``) — a proxy,
-   a browserless instance, anything that takes a URL and returns page source.
+   a browserless instance, anything that takes a URL and returns page source. Two wire
+   contracts are spoken; see :func:`_plan_request`.
 
 Parsing tries three layouts in order, because IMDb has shipped all three and a saved
 page could be any of them:
@@ -25,6 +26,7 @@ from __future__ import annotations
 import html
 import json
 import re
+from dataclasses import dataclass
 from typing import Any
 
 import httpx2
@@ -280,10 +282,9 @@ class ImdbTechnicalProvider:
     async def fetch(self, imdb_id: str) -> str:
         """Return the page source for ``tt…``'s technical page.
 
-        The fetcher is called as ``GET {IMDB_FETCHER_URL}?url={imdb_url}`` with an
-        optional bearer token. Either raw HTML or a JSON envelope with a
-        ``content`` / ``html`` / ``body`` / ``data`` key is accepted, which covers
-        browserless, most scraping APIs, and a twenty-line Worker.
+        The request is shaped by :func:`_plan_request`. Either raw HTML or a JSON
+        envelope with a ``content`` / ``html`` / ``body`` / ``data`` key is accepted,
+        which covers browserless, most scraping APIs, and a twenty-line Worker.
         """
         if not self.enabled:
             raise ProviderDisabled(
@@ -293,18 +294,24 @@ class ImdbTechnicalProvider:
             raise ProviderUnavailable(f"{imdb_id!r} is not an IMDb title id.")
 
         target = f"https://www.imdb.com/title/{imdb_id}/technical/"
-        headers = {"Accept": "text/html,application/json", "User-Agent": self._settings.user_agent}
-        if self._settings.imdb_fetcher_token:
-            headers["Authorization"] = f"Bearer {self._settings.imdb_fetcher_token}"
+        plan = _plan_request(self._settings, target)
 
-        url = str(self._settings.imdb_fetcher_url)
+        async def send(client: httpx2.AsyncClient) -> httpx2.Response:
+            return await client.request(
+                plan.method,
+                plan.url,
+                params=plan.params,
+                headers=plan.headers,
+                json=plan.payload,
+            )
+
         timeout = self._settings.imdb_fetcher_timeout_seconds
         try:
             if self._client is not None:
-                response = await self._client.get(url, params={"url": target}, headers=headers)
+                response = await send(self._client)
             else:
                 async with httpx2.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-                    response = await client.get(url, params={"url": target}, headers=headers)
+                    response = await send(client)
         except httpx2.HTTPError as exc:
             raise ProviderUnavailable(
                 "Could not reach the IMDb fetcher.", detail=type(exc).__name__
@@ -325,6 +332,82 @@ class ImdbTechnicalProvider:
             return parse_technical(await self.fetch(imdb_id))
 
         return await self._cache.get_or_set(imdb_id, parse)
+
+
+@dataclass(frozen=True, slots=True)
+class _FetchRequest:
+    """One outbound call to the operator's fetcher, fully shaped."""
+
+    method: str
+    url: str
+    params: dict[str, str]
+    headers: dict[str, str]
+    payload: dict[str, Any] | None
+
+
+# The endpoint names browserless serves HTML on. A configured URL ending in one of
+# them — or in nothing at all, which is how a host:port gets written down — is a
+# browserless instance rather than a fetcher someone wrote.
+_BROWSERLESS_ENDPOINTS = frozenset({"", "content", "unblock"})
+
+
+def _endpoint_name(url: httpx2.URL) -> str:
+    """The last path segment, so a reverse-proxied ``/browserless/content`` still counts."""
+    return url.path.strip("/").rsplit("/", 1)[-1].casefold()
+
+
+def _plan_request(settings: Settings, target: str) -> _FetchRequest:
+    """Shape the fetcher call for whichever contract the configured URL speaks.
+
+    ``query`` (the default for a URL with a path of its own)::
+
+        GET {IMDB_FETCHER_URL}?url={target}      Authorization: Bearer {token}
+
+    ``browserless`` (a bare ``host:port``, ``/content`` or ``/unblock``)::
+
+        POST {IMDB_FETCHER_URL}?token={token}    {"url": "{target}", …}
+
+    Browserless serves HTML on POST-with-a-JSON-body only; there is no ``?url=`` route
+    to configure, so the difference has to live here. ``IMDB_FETCHER_MODE`` forces
+    either contract when the endpoint name guesses wrong.
+    """
+    url = httpx2.URL(str(settings.imdb_fetcher_url))
+    token = settings.imdb_fetcher_token
+    # Whatever the operator put in the URL is kept: an API key already in the query
+    # string must survive the parameters this adds.
+    params: dict[str, str] = dict(url.params)
+    headers = {"Accept": "text/html,application/json", "User-Agent": settings.user_agent}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    mode = settings.imdb_fetcher_mode
+    endpoint_name = _endpoint_name(url)
+    if mode == "query" or (mode == "auto" and endpoint_name not in _BROWSERLESS_ENDPOINTS):
+        return _FetchRequest("GET", str(url), {**params, "url": target}, headers, None)
+
+    # /content is the endpoint; a bare host:port means the operator wrote down the
+    # instance rather than the route.
+    endpoint = str(url) if endpoint_name else str(url.copy_with(path="/content", query=None))
+    if token:
+        # browserless v1 only reads the query parameter; v2 reads either. The bearer
+        # header stays on for whatever reverse proxy may be in front of it.
+        params["token"] = token
+
+    if endpoint_name == "unblock":
+        # /unblock drives a stealth browser for WAF-protected pages and returns JSON;
+        # "content" is what asks for the HTML in it. It takes no gotoOptions.
+        return _FetchRequest("POST", endpoint, params, headers, {"url": target, "content": True})
+
+    # The parser reads __NEXT_DATA__, which is in the initial HTML, so there is nothing
+    # to gain by waiting for network idle — that only waits for IMDb's ad trackers.
+    # Chrome is given 90% of the HTTP timeout so it reports the failure rather than
+    # having the connection cut from under it.
+    goto_timeout_ms = max(1000, int(settings.imdb_fetcher_timeout_seconds * 900))
+    payload: dict[str, Any] = {
+        "url": target,
+        "gotoOptions": {"waitUntil": "domcontentloaded", "timeout": goto_timeout_ms},
+    }
+    return _FetchRequest("POST", endpoint, params, headers, payload)
 
 
 def _unwrap_json_envelope(body: str) -> str | None:

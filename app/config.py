@@ -12,6 +12,7 @@ produces real encoding settings.
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -51,7 +52,15 @@ class Settings(BaseSettings):
     # Pasting the /technical page source always works. Optionally, a fetcher you
     # control (proxy, browserless, cookie-bearing service) can retrieve it instead;
     # it receives the IMDb URL and returns the page source.
+    #
+    # Two wire contracts, because browserless has no GET ?url= route and cannot be
+    # configured to grow one:
+    #   query        GET  {url}?url={imdb_url}          — a proxy or Worker you wrote
+    #   browserless  POST {url} {"url": "{imdb_url}"}   — browserless /content, /unblock
+    # "auto" reads the endpoint name: a bare host:port, /content or /unblock is
+    # browserless, anything else is the query contract.
     imdb_fetcher_url: str | None = None
+    imdb_fetcher_mode: Literal["auto", "query", "browserless"] = "auto"
     imdb_fetcher_token: str | None = None
     imdb_fetcher_timeout_seconds: float = 20.0
 

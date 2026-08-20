@@ -104,17 +104,59 @@ site, so **the app never scrapes it**. Two ways to get the data in:
 - **Paste the page source.** Open `https://www.imdb.com/title/tt0083658/technical`,
   view source, paste. Both the current `__NEXT_DATA__` payload and the older markup are
   parsed. This always works and needs no configuration.
-- **Point `IMDB_FETCHER_URL` at a fetcher you run.** The app sends
-  `GET <IMDB_FETCHER_URL>?url=https://www.imdb.com/title/<tt…>/technical/`, adding
-  `Authorization: Bearer <IMDB_FETCHER_TOKEN>` when a token is set, and expects the page
-  source as the response body. A JSON response is unwrapped from any of `content`,
-  `html`, `body`, `data`, `result` or `text`, so browserless and most scraping APIs work
-  unmodified. A proxy, a Worker, or anything cookie-bearing you control will do.
+- **Point `IMDB_FETCHER_URL` at a fetcher you run.** A browserless instance, a proxy, a
+  Worker, or anything cookie-bearing you control. Two wire contracts are spoken, and the
+  endpoint name in the URL picks one:
+
+  - `http://192.168.1.2:3579/content` → `POST {"url": "…/technical/", "gotoOptions": {…}}`
+  - `http://192.168.1.2:3579/unblock` → `POST {"url": "…/technical/", "content": true}`
+  - `http://192.168.1.2:3579` → the same as `/content`; a bare `host:port` is taken as a
+    browserless instance
+  - `https://proxy.example/get` → `GET ?url=https://www.imdb.com/title/tt…/technical/`,
+    with `Authorization: Bearer <IMDB_FETCHER_TOKEN>` when a token is set, answering
+    with the page source
+
+`IMDB_FETCHER_MODE` (`auto` by default) forces `query` or `browserless` when the
+endpoint name guesses wrong — a proxy of your own that happens to live at `/content`,
+say. A JSON response is unwrapped from any of `content`, `html`, `body`, `data`,
+`result` or `text`, so `/unblock` and most scraping APIs need nothing extra.
 
 A pasted page always wins over a fetched one.
 
 If a fetch fails the app says so and carries on with the release year as the only clue
 to the grain, which it labels as a guess.
+
+### With browserless
+
+Browserless serves HTML on `POST` with a JSON body only — there is no `?url=` route on
+it, and none can be configured — so the app builds that request itself. Point it at the
+instance and set the token you started the container with:
+
+```dotenv
+IMDB_FETCHER_URL=http://192.168.1.2:3579/content
+IMDB_FETCHER_TOKEN=your-browserless-token
+IMDB_FETCHER_TIMEOUT_SECONDS=45.0
+```
+
+The token travels as `?token=` (browserless v1 reads only that) and as
+`Authorization: Bearer` (v2 reads either, and a reverse proxy in front may want it).
+Chrome is given 90% of the timeout to reach `domcontentloaded`, so a slow page comes
+back as a browserless error rather than a severed connection; `__NEXT_DATA__` is in the
+initial HTML, so waiting for network idle would only wait for IMDb's ad trackers.
+
+Check the instance is reachable before wiring it up:
+
+```bash
+curl -s "http://192.168.1.2:3579/json/version"                      # is anything listening
+curl -sD - -o /dev/null -X POST "http://192.168.1.2:3579/content?token=$TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"url":"https://www.imdb.com/title/tt0083658/technical/"}'    # does IMDb answer it
+```
+
+IMDb has a WAF, so plain `/content` may come back as a challenge page — the specs then
+read as empty and the app says it found nothing recognisable. If your image has
+`/unblock` (the stealth endpoint), point `IMDB_FETCHER_URL` at that instead; if not,
+pasting the page source is the path that always works.
 
 ## Gemini (optional)
 
@@ -158,8 +200,9 @@ starts with an empty config, the home page reports which integrations are active
 | `GEMINI_MAX_OUTPUT_TOKENS`     | `2048`                           | Response cap                                                   |
 | `GEMINI_TEMPERATURE`           | `0.2`                            | Low on purpose: this is a settings decision                    |
 | `IMDB_FETCHER_URL`             | —                                | Optional `/technical` fetcher; pasting works without one       |
-| `IMDB_FETCHER_TOKEN`           | —                                | Sent as `Authorization: Bearer …` when set                     |
-| `IMDB_FETCHER_TIMEOUT_SECONDS` | `20.0`                           | Per-request timeout                                            |
+| `IMDB_FETCHER_MODE`            | `auto`                           | `auto` / `query` / `browserless` — how to call the fetcher     |
+| `IMDB_FETCHER_TOKEN`           | —                                | Bearer header, plus `?token=` in browserless mode              |
+| `IMDB_FETCHER_TIMEOUT_SECONDS` | `20.0`                           | Per-request timeout; 45 suits browserless                      |
 | `CACHE_TTL_SECONDS`            | `3600`                           | In-process TTL for TMDB, IMDb and Gemini results; `0` disables |
 | `HOST` / `PORT`                | `0.0.0.0` / `8080`               | Listen address                                                 |
 | `USER_AGENT`                   | `graindamage/0.7 …`              | Sent on every outbound request                                 |
