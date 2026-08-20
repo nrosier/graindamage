@@ -246,6 +246,12 @@ docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.30.1 git /repo --re
 docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.30.1 dir /repo --redact --verbose
 ```
 
+False positives are listed by fingerprint in [`.gitleaksignore`](.gitleaksignore), one
+per line with the reason it is safe. Prefer changing the value over adding a line: a
+test that needs a credential-shaped string can build it from parts at runtime, which
+keeps the scanner useful. History is a different matter — a published commit cannot be
+un-flagged any other way.
+
 **`docker.yml`** — builds the image and pushes it to Docker Hub as
 `<DOCKERHUB_USERNAME>/graindamage`:
 

@@ -1,0 +1,11 @@
+# Known false positives, by fingerprint (commit:path:rule:line for history scans).
+#
+# Each entry needs a reason. An unexplained line here is indistinguishable from a
+# leak someone decided to stop thinking about.
+
+# A fabricated JWT-shaped string in a test that checks a TMDB v4 token is sent as an
+# Authorization header instead of a query parameter. It was never a credential: the
+# payload decodes to {"sub":"1"} and the signature is the word "signature". The tip of
+# the tree no longer contains it — the test builds the value from parts now — but the
+# commit that introduced it is already published, so history stays flagged without this.
+b015d767b549ba384a7e5fe65d14ca91f66df0a7:tests/test_tmdb.py:generic-api-key:119
