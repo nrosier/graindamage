@@ -1,14 +1,15 @@
 {% extends "base.html" %}
 
 {% block content %}
-<ol class="steps" aria-label="Progress">
-  <li class="current">Find the film</li>
-  <li>Confirm and add source specs</li>
-  <li>Get AV1 and x265 settings</li>
-</ol>
+{% include "partials/steps.html" %}
 
 <section class="card">
   <h2>Find the film</h2>
+  <p class="muted intro">
+    Grain is the single biggest factor in how a film should be encoded, and it comes
+    from the negative rather than from the file. Naming the film lets us look up what
+    it was shot on.
+  </p>
   <form class="search-form" hx-post="/search" hx-target="#results" hx-indicator="#spinner">
     <label class="sr-only" for="query">Movie title</label>
     <input
@@ -23,13 +24,24 @@
     <button type="submit">Search</button>
     <span id="spinner" class="spinner" aria-hidden="true">searching…</span>
   </form>
+  {% if not capabilities.tmdb_search %}
+    <p class="muted">
+      No <code>TMDB_API_KEY</code> is set, so search is off. The deterministic rules
+      still work — you will just have to set the grain level by hand.
+    </p>
+  {% endif %}
 </section>
 
 <section id="results" aria-live="polite"></section>
+<section id="advice" aria-live="polite"></section>
 
 <section class="card status">
   <h2>Configuration</h2>
   <ul class="capabilities">
+    <li class="{{ 'on' if capabilities.baseline_rules else 'off' }}">
+      <strong>Baseline rules</strong>
+      <span>always available — no keys, no network</span>
+    </li>
     <li class="{{ 'on' if capabilities.tmdb_search else 'off' }}">
       <strong>TMDB search</strong>
       <span>{{ "configured" if capabilities.tmdb_search else "set TMDB_API_KEY to enable" }}</span>

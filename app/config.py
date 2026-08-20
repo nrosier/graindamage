@@ -3,6 +3,10 @@
 Every integration is optional: the app must start and serve a useful page with no
 keys at all, so that a fresh container never dies on missing configuration. What is
 missing is reported through :meth:`Settings.capabilities` instead.
+
+The deterministic rules engine has no configuration and no dependencies, which is
+why ``baseline_rules`` is always reported as available — an unkeyed container still
+produces real encoding settings.
 """
 
 from __future__ import annotations
@@ -24,16 +28,24 @@ class Settings(BaseSettings):
     debug: bool = False
     host: str = "0.0.0.0"  # the container listens on all interfaces by design
     port: int = 8080
+    user_agent: str = "graindamage/0.7 (+https://github.com/nrosier/graindamage)"
 
     # --- TMDB: title search and metadata ----------------------------------
     tmdb_api_key: str | None = None
     tmdb_language: str = "en-US"
     tmdb_base_url: str = "https://api.themoviedb.org/3"
     tmdb_image_base_url: str = "https://image.tmdb.org/t/p"
+    tmdb_poster_size: str = "w185"
+    tmdb_timeout_seconds: float = 10.0
+    tmdb_max_results: int = Field(default=8, ge=1, le=20)
 
     # --- Google Gemini: encoding advice -----------------------------------
     gemini_api_key: str | None = None
     gemini_model: str = "gemini-3.7-flash"
+    gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
+    gemini_timeout_seconds: float = 45.0
+    gemini_max_output_tokens: int = Field(default=2048, ge=256)
+    gemini_temperature: float = Field(default=0.2, ge=0.0, le=2.0)
 
     # --- IMDb technical specs ---------------------------------------------
     # Pasting the /technical page source always works. Optionally, a fetcher you
@@ -64,6 +76,7 @@ class Settings(BaseSettings):
             "tmdb_search": self.tmdb_enabled,
             "gemini_advice": self.gemini_enabled,
             "imdb_technical_fetcher": self.imdb_fetcher_enabled,
+            "baseline_rules": True,
         }
 
 

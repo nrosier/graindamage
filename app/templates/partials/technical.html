@@ -1,0 +1,34 @@
+{#
+  The IMDb /technical rows. Rendered inside the step-2 form on first load, and again
+  on its own when the fetch button refreshes #technical-panel.
+#}
+{% if specs_error %}
+  <p class="inline-warning">{{ specs_error }}</p>
+{% endif %}
+
+{% if specs.is_empty %}
+  <p class="muted">
+    No technical rows yet. Without them the grain level is a guess from the release
+    year — fetch or paste the <code>/technical</code> page to fix that.
+  </p>
+{% else %}
+  <dl class="specs">
+    {% for label, values in [
+      ("Negative format", specs.negative_formats),
+      ("Cinematographic process", specs.cinematographic_processes),
+      ("Printed film format", specs.printed_formats),
+      ("Cameras", specs.cameras),
+      ("Aspect ratio", specs.aspect_ratios),
+      ("Film length", specs.film_lengths),
+      ("Colour", specs.colors),
+      ("Laboratory", specs.laboratories),
+      ("Sound mix", specs.sound_mixes),
+      ("Runtime", specs.runtimes),
+    ] %}
+      {% if values %}
+        <dt>{{ label }}</dt>
+        <dd>{{ values | join(" · ") }}</dd>
+      {% endif %}
+    {% endfor %}
+  </dl>
+{% endif %}

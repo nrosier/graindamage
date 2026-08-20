@@ -1,0 +1,27 @@
++ EBML head
+|+ Document type: matroska
+|+ Document type version: 4
++ Segment: size 8589934592
+|+ Segment information
+| + Timestamp scale: 1000000
+| + Writing application: some other muxer
+| + Duration: 01:52:30.000000000
+|+ Tracks
+| + Track
+|  + Track number: 1 (track ID for mkvmerge & mkvextract: 0)
+|  + Track UID: 4211
+|  + Track type: video
+|  + Codec ID: V_MPEG4/ISO/AVC
+|  + Video track
+|   + Pixel width: 1920
+|   + Pixel height: 816
+|   + Display width: 1920
+|   + Display height: 816
+| + Track
+|  + Track number: 2 (track ID for mkvmerge & mkvextract: 1)
+|  + Track UID: 4212
+|  + Track type: audio
+|  + Codec ID: A_AC3
+|  + Audio track
+|   + Sampling frequency: 48000
+|   + Channels: 6

@@ -1,0 +1,7 @@
+{# Returned with HTTP 200 so HTMX will actually swap it in. See app/routes.py. #}
+<div class="card problem" role="alert">
+  <h2>That did not work</h2>
+  <p>{{ message }}</p>
+  {% if detail %}<p class="muted">Detail: <code>{{ detail }}</code></p>{% endif %}
+  {% if help_text %}<p class="muted">{{ help_text }}</p>{% endif %}
+</div>

@@ -1,0 +1,197 @@
+{% include "partials/steps.html" %}
+<section id="advice" hx-swap-oob="true"></section>
+
+{% set grain_labels = {
+  "none": "None — digital capture, clean image",
+  "light": "Light — large-format film, or gentle digital noise",
+  "moderate": "Moderate — typical 35 mm",
+  "heavy": "Heavy — 16 mm, Super 16, 2-perf",
+  "extreme": "Extreme — 8 mm, or grain as a stylistic choice",
+} %}
+{% set tool_labels = {
+  "ffprobe": "ffprobe JSON",
+  "mkvinfo": "mkvinfo",
+  "mediainfo": "MediaInfo",
+} %}
+{% set speed_labels = {
+  "quality": "Quality — slowest presets, best result",
+  "balanced": "Balanced — a sensible overnight encode",
+  "fast": "Fast — noticeably quicker, slightly worse",
+} %}
+{% set size_labels = {
+  "archival": "Archival — spend bitrate, keep everything",
+  "balanced": "Balanced",
+  "compact": "Compact — accept some loss for size",
+} %}
+
+<div class="card film">
+  {% if movie.poster_url %}
+    <img class="poster large" src="{{ movie.poster_url }}" alt="" width="92" />
+  {% endif %}
+  <div>
+    <h2>
+      {{ movie.title }}
+      {% if movie.year %}<span class="muted">({{ movie.year }})</span>{% endif %}
+    </h2>
+    <p class="muted film-meta">
+      {% if movie.directors %}{{ movie.directors | join(", ") }}{% endif %}
+      {% if movie.runtime_minutes %} · {{ movie.runtime_minutes }} min{% endif %}
+      {% if movie.genres %} · {{ movie.genres | join(", ") }}{% endif %}
+      {% if movie.countries %} · {{ movie.countries | join(", ") }}{% endif %}
+    </p>
+    {% if movie.imdb_url %}
+      <p class="muted">
+        <a href="{{ movie.imdb_url }}" target="_blank" rel="noreferrer noopener">IMDb</a>
+        ·
+        <a href="{{ movie.imdb_technical_url }}" target="_blank" rel="noreferrer noopener">
+          technical specifications
+        </a>
+      </p>
+    {% endif %}
+  </div>
+</div>
+
+<form
+  class="card advise-form"
+  hx-post="/advise"
+  hx-target="#advice"
+  hx-indicator="#advise-spinner"
+>
+  <input type="hidden" name="tmdb_id" value="{{ movie.tmdb_id }}" />
+  <input type="hidden" name="imdb_id" value="{{ movie.imdb_id or '' }}" />
+
+  <h2>How it was shot</h2>
+  <div id="technical-panel">
+    {% include "partials/technical.html" %}
+  </div>
+
+  <p class="row">
+    {% if capabilities.imdb_technical_fetcher and movie.imdb_id %}
+      <button
+        type="button"
+        class="secondary"
+        hx-post="/technical"
+        hx-params="imdb_id"
+        hx-target="#technical-panel"
+        hx-swap="innerHTML"
+      >
+        Fetch from IMDb
+      </button>
+    {% endif %}
+  </p>
+
+  <details class="paste">
+    <summary>Paste the IMDb <code>/technical</code> page source</summary>
+    <p class="muted">
+      Open the technical page, view source, select all, paste here. This app never
+      requests IMDb itself. A paste overrides anything fetched above.
+    </p>
+    <label class="sr-only" for="technical_source">IMDb technical page source</label>
+    <textarea
+      id="technical_source"
+      name="technical_source"
+      rows="4"
+      spellcheck="false"
+      placeholder="&lt;!DOCTYPE html&gt;…"
+    ></textarea>
+  </details>
+
+  <h2>Your source file</h2>
+  <p class="muted">
+    Run one of these and paste the whole output. ffprobe is the most complete;
+    mkvinfo is authoritative for Matroska but often omits bit depth; MediaInfo rounds
+    its numbers.
+  </p>
+  <ul class="commands muted">
+    <li><code>ffprobe -v quiet -print_format json -show_format -show_streams FILE</code></li>
+    <li><code>mkvinfo FILE</code></li>
+    <li><code>mediainfo FILE</code></li>
+  </ul>
+  <label class="sr-only" for="source_text">Source file description</label>
+  <textarea
+    id="source_text"
+    name="source_text"
+    rows="10"
+    spellcheck="false"
+    placeholder="Paste ffprobe JSON, mkvinfo output, or a MediaInfo report…"
+  ></textarea>
+
+  <div class="grid">
+    <p class="field">
+      <label for="source_tool">Parse as</label>
+      <select id="source_tool" name="source_tool">
+        <option value="">Work it out from the text</option>
+        {% for tool in source_tools %}
+          <option value="{{ tool.value }}">{{ tool_labels[tool.value] }}</option>
+        {% endfor %}
+      </select>
+    </p>
+    <p class="field">
+      <label for="bit_depth_override">Bit depth</label>
+      <select id="bit_depth_override" name="bit_depth_override">
+        <option value="">From the file</option>
+        <option value="8">8-bit</option>
+        <option value="10">10-bit</option>
+        <option value="12">12-bit</option>
+      </select>
+    </p>
+  </div>
+
+  <h2>What you want out of it</h2>
+  <div class="grid">
+    <p class="field">
+      <label for="grain_override">Grain</label>
+      <select id="grain_override" name="grain_override">
+        <option value="">Work it out from the film</option>
+        {% for level in grain_levels %}
+          <option value="{{ level.value }}">{{ grain_labels[level.value] }}</option>
+        {% endfor %}
+      </select>
+    </p>
+    <p class="field">
+      <label for="speed">Encoding time</label>
+      <select id="speed" name="speed">
+        {% for choice in speeds %}
+          <option value="{{ choice.value }}" {{ "selected" if choice.value == "balanced" }}>
+            {{ speed_labels[choice.value] }}
+          </option>
+        {% endfor %}
+      </select>
+    </p>
+    <p class="field">
+      <label for="size">Size target</label>
+      <select id="size" name="size">
+        {% for choice in sizes %}
+          <option value="{{ choice.value }}" {{ "selected" if choice.value == "balanced" }}>
+            {{ size_labels[choice.value] }}
+          </option>
+        {% endfor %}
+      </select>
+    </p>
+  </div>
+
+  <div class="grid">
+    <p class="field">
+      <label for="input_path">Input filename</label>
+      <input id="input_path" name="input_path" type="text" placeholder="input.mkv" />
+    </p>
+    <p class="field">
+      <label for="output_stem">Output name</label>
+      <input id="output_stem" name="output_stem" type="text" placeholder="from the title" />
+    </p>
+  </div>
+
+  {% if capabilities.gemini_advice %}
+    <p class="field check">
+      <label>
+        <input type="checkbox" name="use_gemini" checked />
+        Have Gemini review the settings for this specific film
+      </label>
+    </p>
+  {% endif %}
+
+  <p class="row">
+    <button type="submit">Get settings</button>
+    <span id="advise-spinner" class="spinner" aria-hidden="true">working it out…</span>
+  </p>
+</form>

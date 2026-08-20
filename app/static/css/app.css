@@ -7,6 +7,7 @@
   --muted: #9a9891;
   --accent: #d9a441;
   --ok: #6fbf73;
+  --warn: #e07a5f;
   --off: #6b6f78;
   --radius: 10px;
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
@@ -225,4 +226,378 @@ code {
   clip: rect(0, 0, 0, 0);
   white-space: nowrap;
   border: 0;
+}
+
+/* --- shared bits -------------------------------------------------------- */
+
+.steps li.done {
+  color: var(--text);
+  border-color: var(--line);
+}
+
+.card.problem {
+  border-left: 3px solid var(--warn);
+}
+
+.intro {
+  margin-top: -0.35rem;
+}
+
+h3 {
+  font-size: 0.9rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  margin: 1.4rem 0 0.6rem;
+}
+
+a {
+  color: var(--accent);
+}
+
+.row {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  flex-wrap: wrap;
+  margin: 0.9rem 0 0;
+}
+
+button.secondary {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  color: var(--text);
+  font-weight: 500;
+}
+
+button.copied {
+  border-color: var(--ok);
+  color: var(--ok);
+}
+
+.grid {
+  display: grid;
+  gap: 0.75rem 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  margin: 0.75rem 0 0;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.field.check {
+  flex-direction: row;
+  align-items: center;
+}
+
+.field label {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.field.check label {
+  font-weight: 400;
+  color: var(--muted);
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+select,
+textarea {
+  width: 100%;
+  padding: 0.55rem 0.7rem;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 0.95rem;
+}
+
+textarea {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  line-height: 1.45;
+  resize: vertical;
+}
+
+select:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+details {
+  margin-top: 0.9rem;
+}
+
+summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+summary:hover {
+  color: var(--text);
+}
+
+.commands {
+  list-style: none;
+  padding: 0;
+  margin: 0.5rem 0 0.9rem;
+  font-size: 0.8rem;
+  display: grid;
+  gap: 0.3rem;
+}
+
+/* --- search results ----------------------------------------------------- */
+
+.hits {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.9rem;
+}
+
+.hits li {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 0.9rem;
+  align-items: start;
+  padding-top: 0.9rem;
+  border-top: 1px solid var(--line);
+}
+
+.hits li:first-child {
+  border-top: none;
+  padding-top: 0;
+}
+
+.hits h3 {
+  margin: 0;
+  font-size: 1rem;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text);
+}
+
+.poster {
+  border-radius: 6px;
+  display: block;
+  background: var(--panel-2);
+}
+
+.poster.placeholder {
+  width: 60px;
+  height: 90px;
+  border: 1px dashed var(--line);
+}
+
+.original,
+.overview {
+  margin: 0.2rem 0 0;
+  font-size: 0.85rem;
+}
+
+/* --- the film card ------------------------------------------------------ */
+
+.card.film {
+  display: flex;
+  gap: 1.1rem;
+  align-items: flex-start;
+}
+
+.card.film h2 {
+  margin-bottom: 0.2rem;
+  font-size: 1.2rem;
+}
+
+.film-meta {
+  margin: 0 0 0.35rem;
+  font-size: 0.9rem;
+}
+
+.specs {
+  display: grid;
+  grid-template-columns: minmax(9rem, auto) 1fr;
+  gap: 0.35rem 1rem;
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.specs dt {
+  color: var(--muted);
+}
+
+.specs dd {
+  margin: 0;
+}
+
+.inline-warning {
+  margin: 0 0 0.6rem;
+  padding: 0.5rem 0.7rem;
+  border-left: 2px solid var(--warn);
+  background: rgba(224, 122, 95, 0.08);
+  font-size: 0.9rem;
+}
+
+/* --- advice ------------------------------------------------------------- */
+
+.summary {
+  margin: 0 0 0.8rem;
+  font-size: 1.02rem;
+}
+
+.badges {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0;
+}
+
+.badge {
+  font-size: 0.75rem;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  padding: 0.2rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  background: var(--panel-2);
+}
+
+.badge.grain-moderate,
+.badge.grain-heavy,
+.badge.grain-extreme {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.badge.hdr,
+.badge.ai {
+  border-color: var(--ok);
+  color: var(--ok);
+}
+
+.reasons,
+.warnings,
+.notes,
+.rejected {
+  margin: 0.6rem 0 0;
+  padding-left: 1.1rem;
+  display: grid;
+  gap: 0.45rem;
+  font-size: 0.92rem;
+}
+
+.rejected {
+  font-size: 0.85rem;
+}
+
+.plan-headline {
+  display: block;
+  font-weight: 400;
+  font-size: 0.85rem;
+  color: var(--accent);
+  font-family: var(--mono);
+  margin-top: 0.2rem;
+}
+
+.estimate {
+  margin: 0;
+  font-size: 0.88rem;
+}
+
+.breakdown {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+}
+
+.breakdown th,
+.breakdown td {
+  text-align: left;
+  padding: 0.35rem 0.6rem 0.35rem 0;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+  font-weight: 400;
+}
+
+.breakdown th {
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.breakdown .num {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+  width: 4rem;
+}
+
+.breakdown .total th,
+.breakdown .total .num {
+  color: var(--accent);
+  font-weight: 600;
+  border-bottom: none;
+}
+
+.command {
+  display: flex;
+  gap: 0.6rem;
+  align-items: flex-start;
+}
+
+.command pre {
+  flex: 1;
+  margin: 0;
+  padding: 0.7rem 0.8rem;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow-x: auto;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.command pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: inherit;
+}
+
+.params {
+  display: grid;
+  grid-template-columns: minmax(8rem, auto) 1fr;
+  gap: 0.3rem 0.8rem;
+  margin: 0.6rem 0 0;
+  font-size: 0.85rem;
+}
+
+.params dt,
+.params dd {
+  margin: 0;
+}
+
+@media (max-width: 34rem) {
+  .hits li {
+    grid-template-columns: auto 1fr;
+  }
+
+  .command {
+    flex-direction: column;
+  }
 }

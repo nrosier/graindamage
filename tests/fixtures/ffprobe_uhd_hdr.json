@@ -1,0 +1,108 @@
+{
+  "streams": [
+    {
+      "index": 0,
+      "codec_name": "hevc",
+      "codec_long_name": "H.265 / HEVC (High Efficiency Video Coding)",
+      "profile": "Main 10",
+      "codec_type": "video",
+      "width": 3840,
+      "height": 2160,
+      "coded_width": 3840,
+      "coded_height": 2160,
+      "has_b_frames": 2,
+      "sample_aspect_ratio": "1:1",
+      "display_aspect_ratio": "16:9",
+      "pix_fmt": "yuv420p10le",
+      "level": 153,
+      "color_range": "tv",
+      "color_space": "bt2020nc",
+      "color_transfer": "smpte2084",
+      "color_primaries": "bt2020",
+      "chroma_location": "topleft",
+      "field_order": "progressive",
+      "refs": 1,
+      "r_frame_rate": "24000/1001",
+      "avg_frame_rate": "24000/1001",
+      "time_base": "1/1000",
+      "bits_per_raw_sample": "10",
+      "disposition": { "default": 1, "attached_pic": 0 },
+      "tags": {
+        "BPS-eng": "58120000",
+        "DURATION-eng": "02:01:01.000000000",
+        "NUMBER_OF_BYTES-eng": "52800000000",
+        "language": "eng"
+      },
+      "side_data_list": [
+        {
+          "side_data_type": "Mastering display metadata",
+          "red_x": "34000/50000",
+          "red_y": "16000/50000",
+          "green_x": "13250/50000",
+          "green_y": "34500/50000",
+          "blue_x": "7500/50000",
+          "blue_y": "3000/50000",
+          "white_point_x": "15635/50000",
+          "white_point_y": "16450/50000",
+          "min_luminance": "1/10000",
+          "max_luminance": "10000000/10000"
+        },
+        {
+          "side_data_type": "Content light level metadata",
+          "max_content": 1000,
+          "max_average": 400
+        }
+      ]
+    },
+    {
+      "index": 1,
+      "codec_name": "truehd",
+      "codec_long_name": "TrueHD",
+      "codec_type": "audio",
+      "sample_fmt": "s32",
+      "sample_rate": "48000",
+      "channels": 8,
+      "channel_layout": "7.1",
+      "bits_per_raw_sample": 24,
+      "disposition": { "default": 1 },
+      "tags": { "language": "eng", "title": "TrueHD Atmos 7.1" }
+    },
+    {
+      "index": 2,
+      "codec_name": "ac3",
+      "codec_type": "audio",
+      "sample_rate": "48000",
+      "channels": 6,
+      "channel_layout": "5.1(side)",
+      "bit_rate": "640000",
+      "disposition": { "default": 0 },
+      "tags": { "language": "fra" }
+    },
+    {
+      "index": 3,
+      "codec_name": "subrip",
+      "codec_type": "subtitle",
+      "disposition": { "default": 0, "forced": 0 },
+      "tags": { "language": "eng" }
+    },
+    {
+      "index": 4,
+      "codec_name": "mjpeg",
+      "codec_type": "video",
+      "width": 600,
+      "height": 900,
+      "disposition": { "attached_pic": 1 },
+      "tags": { "filename": "cover.jpg", "mimetype": "image/jpeg" }
+    }
+  ],
+  "format": {
+    "filename": "movie.mkv",
+    "nb_streams": 5,
+    "format_name": "matroska,webm",
+    "format_long_name": "Matroska / WebM",
+    "duration": "7261.000000",
+    "size": "56000000000",
+    "bit_rate": "61700000",
+    "tags": { "title": "Movie", "encoder": "libebml v1.4.4" }
+  }
+}

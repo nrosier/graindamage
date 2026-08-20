@@ -1,12 +1,46 @@
-{# Placeholder until the TMDB provider lands in milestone 2. #}
-<div class="card notice">
-  <h2>Not wired up yet</h2>
-  {% if query %}
-    <p>Searched for <strong>{{ query }}</strong>. The TMDB provider arrives in milestone 2.</p>
-  {% else %}
-    <p>Type a title to search. The TMDB provider arrives in milestone 2.</p>
-  {% endif %}
-  {% if not tmdb_enabled %}
-    <p class="muted">No <code>TMDB_API_KEY</code> is set, so search will stay disabled until you add one.</p>
-  {% endif %}
-</div>
+{% include "partials/steps.html" %}
+{# Picking a new film invalidates whatever advice is on screen. #}
+<section id="advice" hx-swap-oob="true"></section>
+
+{% if not hits %}
+  <div class="card notice">
+    <h2>Nothing found</h2>
+    <p>
+      TMDB has no match for <strong>{{ query }}</strong>. Try the original-language
+      title, or drop the year.
+    </p>
+  </div>
+{% else %}
+  <div class="card">
+    <h2>{{ hits | length }} match{{ "es" if hits | length != 1 }} for “{{ query }}”</h2>
+    <ul class="hits">
+      {% for hit in hits %}
+        <li>
+          {% if hit.poster_url %}
+            <img class="poster" src="{{ hit.poster_url }}" alt="" width="60" loading="lazy" />
+          {% else %}
+            <span class="poster placeholder" aria-hidden="true"></span>
+          {% endif %}
+          <div class="hit-body">
+            <h3>
+              {{ hit.title }}
+              {% if hit.year %}<span class="muted">({{ hit.year }})</span>{% endif %}
+            </h3>
+            {% if hit.original_title and hit.original_title != hit.title %}
+              <p class="muted original">{{ hit.original_title }}</p>
+            {% endif %}
+            {% if hit.overview %}<p class="overview">{{ hit.overview | truncate(180) }}</p>{% endif %}
+          </div>
+          <form
+            hx-post="/pick"
+            hx-target="#results"
+            hx-indicator="#spinner"
+          >
+            <input type="hidden" name="tmdb_id" value="{{ hit.tmdb_id }}" />
+            <button type="submit">This one</button>
+          </form>
+        </li>
+      {% endfor %}
+    </ul>
+  </div>
+{% endif %}

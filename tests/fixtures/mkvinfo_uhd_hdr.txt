@@ -1,0 +1,100 @@
++ EBML head
+|+ EBML version: 1
+|+ EBML read version: 1
+|+ Maximum EBML ID length: 4
+|+ Maximum EBML size length: 8
+|+ Document type: matroska
+|+ Document type version: 4
+|+ Document type read version: 2
++ Segment: size 52428800000
+|+ Seek head (subentries will be skipped)
+|+ EBML void: size 4014
+|+ Segment information
+| + Timestamp scale: 1000000
+| + Multiplexing application: libebml v1.4.4 + libmatroska v1.7.1
+| + Writing application: mkvmerge v81.0.0 ('Milliontown') 64-bit
+| + Duration: 02:01:01.000000000
+| + Date: Tue Mar 12 21:14:07 2024 UTC
+| + Segment UID: 0x8f 0x1c 0x22 0x4e 0x9a 0x3b 0x11 0xd0
+|+ Tracks
+| + Track
+|  + Track number: 1 (track ID for mkvmerge & mkvextract: 0)
+|  + Track UID: 1
+|  + Track type: video
+|  + "Default track" flag: 1
+|  + "Forced display" flag: 0
+|  + Language: eng
+|  + Codec ID: V_MPEGH/ISO/HEVC
+|  + Codec's private data: size 2299 (HEVC profile: Main 10 @L5.1)
+|  + Default duration: 00:00:00.041708333 (23.976 frames/fields per second for a video track)
+|  + Video track
+|   + Pixel width: 3840
+|   + Pixel height: 2160
+|   + Display width: 3840
+|   + Display height: 2160
+|   + Display unit: 0
+|   + Interlaced: 2
+|   + Colour
+|    + Colour matrix coefficients: 9
+|    + Colour range: 1
+|    + Colour transfer: 16
+|    + Colour primaries: 9
+|    + Bits per channel: 10
+|    + Chroma subsampling horizontal: 1
+|    + Chroma subsampling vertical: 1
+|    + Maximum content light: 1000
+|    + Maximum frame light: 400
+|    + Video colour mastering metadata
+|     + Red colour coordinate x: 0.68
+|     + Red colour coordinate y: 0.32
+|     + Green colour coordinate x: 0.265
+|     + Green colour coordinate y: 0.69
+|     + Blue colour coordinate x: 0.15
+|     + Blue colour coordinate y: 0.06
+|     + White colour coordinate x: 0.3127
+|     + White colour coordinate y: 0.329
+|     + Maximum luminance: 1000
+|     + Minimum luminance: 0.0001
+| + Track
+|  + Track number: 2 (track ID for mkvmerge & mkvextract: 1)
+|  + Track UID: 2
+|  + Track type: audio
+|  + "Default track" flag: 1
+|  + Language: eng
+|  + Name: TrueHD Atmos 7.1
+|  + Codec ID: A_TRUEHD
+|  + Audio track
+|   + Sampling frequency: 48000
+|   + Channels: 8
+| + Track
+|  + Track number: 3 (track ID for mkvmerge & mkvextract: 2)
+|  + Track UID: 3
+|  + Track type: subtitles
+|  + "Default track" flag: 0
+|  + "Forced display" flag: 0
+|  + Language: eng
+|  + Codec ID: S_TEXT/UTF8
+|+ Tags
+| + Tag
+|  + Targets
+|   + Track UID: 1
+|  + Simple
+|   + Name: BPS
+|   + String: 58120000
+|   + Language: und
+|  + Simple
+|   + Name: DURATION
+|   + String: 02:01:01.000000000
+|   + Language: und
+|  + Simple
+|   + Name: NUMBER_OF_BYTES
+|   + String: 52800000000
+|   + Language: und
+| + Tag
+|  + Targets
+|   + Track UID: 2
+|  + Simple
+|   + Name: BPS
+|   + String: 4200000
+|   + Language: und
+|+ Cluster

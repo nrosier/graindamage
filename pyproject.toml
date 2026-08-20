@@ -1,6 +1,6 @@
 [project]
 name = "graindamage"
-version = "0.1.0"
+version = "0.7.0"
 description = "Grain-aware AV1 and x265 encoding advice from IMDb technical specs and your own source file"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -50,6 +50,14 @@ select = [
     "SIM", # simplify
     "C4",  # comprehensions
     "RUF",
+]
+ignore = [
+    # The UI prose is typeset: en dashes in ranges, × between dimensions, a real
+    # minus sign in negative offsets. These rules guard against homoglyphs in code,
+    # which is not the risk in a page of English sentences.
+    "RUF001",
+    "RUF002",
+    "RUF003",
 ]
 
 [tool.mypy]

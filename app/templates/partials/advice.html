@@ -1,0 +1,156 @@
+{% include "partials/steps.html" %}
+
+{% set video = request_data.source.video %}
+{% set duration = request_data.source.duration_seconds %}
+
+<div class="card advice-summary">
+  <h2>Settings</h2>
+  {% if advice.summary %}<p class="summary">{{ advice.summary }}</p>{% endif %}
+  <ul class="badges">
+    <li class="badge grain-{{ advice.grain.level.value }}">{{ advice.grain.level.value }} grain</li>
+    {% if advice.grain.origin_format %}
+      <li class="badge">{{ advice.grain.origin_format }}</li>
+    {% endif %}
+    <li class="badge">
+      {% if advice.grain.user_override %}
+        set by you
+      {% else %}
+        {{ (advice.grain.confidence * 100) | round | int }}% confident
+      {% endif %}
+    </li>
+    {% if video and video.height %}
+      <li class="badge">{{ video.width }}×{{ video.height }}</li>
+    {% endif %}
+    {% if video and video.is_hdr %}<li class="badge hdr">HDR</li>{% endif %}
+    <li class="badge {{ 'ai' if advice.source.value == 'gemini' else '' }}">
+      {{ "reviewed by Gemini" if advice.source.value == "gemini" else "deterministic rules" }}
+    </li>
+  </ul>
+
+  {% if advice.grain.reasons %}
+    <details open>
+      <summary>Why this grain level</summary>
+      <ul class="reasons">
+        {% for reason in advice.grain.reasons %}<li>{{ reason }}</li>{% endfor %}
+      </ul>
+    </details>
+  {% endif %}
+
+  {% if gemini_enabled and gemini_requested and advice.source.value != "gemini" %}
+    <p class="muted">Gemini was asked but did not contribute; the rules below stand on their own.</p>
+  {% endif %}
+</div>
+
+{% if advice.warnings %}
+  <div class="card problem" role="alert">
+    <h2>Read these first</h2>
+    <ul class="warnings">
+      {% for warning in advice.warnings %}<li>{{ warning }}</li>{% endfor %}
+    </ul>
+  </div>
+{% endif %}
+
+{% if advice.notes %}
+  <div class="card notice">
+    <h2>Before you encode</h2>
+    <ul class="notes">
+      {% for note in advice.notes %}<li>{{ note }}</li>{% endfor %}
+    </ul>
+  </div>
+{% endif %}
+
+{% for plan in advice.plans %}
+  {% set slug = plan.encoder.value %}
+  <div class="card plan">
+    <h2>
+      {{ plan.encoder.label }}
+      <span class="plan-headline">
+        CRF {{ plan.crf_label }} · preset {{ plan.preset }}{% if plan.tune %} · tune {{ plan.tune }}{% endif %}
+      </span>
+    </h2>
+
+    {% if plan.estimated_bitrate_bps %}
+      <p class="muted estimate">
+        Roughly {{ "%.1f" | format(plan.estimated_bitrate_bps / 1000000) }} Mb/s of video
+        {%- if duration %},
+          about {{ "%.1f" | format(plan.estimated_bitrate_bps * duration / 8 / 1000000000) }} GB
+          over {{ (duration / 60) | round | int }} minutes, audio and subtitles on top
+        {%- endif %}. A rough fit, not a measurement.
+      </p>
+    {% endif %}
+
+    <h3>How that CRF was reached</h3>
+    <table class="breakdown">
+      <tbody>
+        {% for adjustment in plan.adjustments %}
+          <tr>
+            <th scope="row">{{ adjustment.label }}</th>
+            <td class="num">
+              {{ "%g" | format(adjustment.delta) if loop.first else "%+g" | format(adjustment.delta) }}
+            </td>
+            <td class="muted">{{ adjustment.detail or "" }}</td>
+          </tr>
+        {% endfor %}
+        <tr class="total">
+          <th scope="row">Final CRF</th>
+          <td class="num">{{ plan.crf_label }}</td>
+          <td class="muted">clamped to the range this encoder is sane in</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>FFmpeg</h3>
+    <div class="command">
+      <pre id="ffmpeg-{{ slug }}"><code>{{ plan.ffmpeg_command }}</code></pre>
+      <button type="button" class="secondary copy" data-copy="#ffmpeg-{{ slug }}">Copy</button>
+    </div>
+
+    <h3>HandBrake</h3>
+    <div class="command">
+      <pre id="handbrake-{{ slug }}"><code>{{ plan.handbrake_command }}</code></pre>
+      <button type="button" class="secondary copy" data-copy="#handbrake-{{ slug }}">Copy</button>
+    </div>
+    <form method="post" action="/preset" class="row">
+      {% for name, value in hidden_fields.items() %}
+        <input type="hidden" name="{{ name }}" value="{{ value }}" />
+      {% endfor %}
+      <input type="hidden" name="encoder" value="{{ slug }}" />
+      <button type="submit" class="secondary">Download HandBrake preset (.json)</button>
+      <span class="muted">Import through Presets → Import from file.</span>
+    </form>
+
+    {% if plan.params %}
+      <details>
+        <summary>Encoder parameters ({{ plan.params | length }})</summary>
+        <dl class="params">
+          {% for name, value in plan.params.items() %}
+            <dt><code>{{ name }}</code></dt>
+            <dd><code>{{ value }}</code></dd>
+          {% endfor %}
+        </dl>
+      </details>
+    {% endif %}
+
+    {% if plan.rationale %}
+      <details open>
+        <summary>Reasoning</summary>
+        <ul class="reasons">
+          {% for line in plan.rationale %}<li>{{ line }}</li>{% endfor %}
+        </ul>
+      </details>
+    {% endif %}
+  </div>
+{% endfor %}
+
+{% if advice.rejected_flags %}
+  <div class="card notice">
+    <h2>Ignored suggestions</h2>
+    <p class="muted">
+      Gemini proposed these and they were dropped before reaching the command line —
+      an unknown flag or an out-of-range value would fail the encode, not improve it.
+    </p>
+    <ul class="rejected">
+      {% for flag in advice.rejected_flags %}<li><code>{{ flag }}</code></li>{% endfor %}
+    </ul>
+  </div>
+{% endif %}

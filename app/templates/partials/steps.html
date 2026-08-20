@@ -1,0 +1,11 @@
+{#
+  The progress indicator. Partials re-render it out of band (hx-swap-oob) so the
+  header keeps up with the flow without every response having to be a full page.
+#}
+<ol class="steps" id="steps" aria-label="Progress"{% if oob %} hx-swap-oob="true"{% endif %}>
+  {% for label in ["Find the film", "Confirm and add source specs", "Get AV1 and x265 settings"] %}
+    <li class="{% if loop.index == step %}current{% elif loop.index < step %}done{% endif %}">
+      {{ label }}
+    </li>
+  {% endfor %}
+</ol>
