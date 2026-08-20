@@ -1,0 +1,14 @@
+services:
+  graindamage:
+    build: .
+    image: graindamage:latest
+    container_name: graindamage
+    ports:
+      - "8080:8080"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Anything set here wins over .env; handy for one-off overrides.
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.7-flash}
+    restart: unless-stopped

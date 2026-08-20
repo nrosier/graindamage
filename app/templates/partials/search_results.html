@@ -1,0 +1,12 @@
+{# Placeholder until the TMDB provider lands in milestone 2. #}
+<div class="card notice">
+  <h2>Not wired up yet</h2>
+  {% if query %}
+    <p>Searched for <strong>{{ query }}</strong>. The TMDB provider arrives in milestone 2.</p>
+  {% else %}
+    <p>Type a title to search. The TMDB provider arrives in milestone 2.</p>
+  {% endif %}
+  {% if not tmdb_enabled %}
+    <p class="muted">No <code>TMDB_API_KEY</code> is set, so search will stay disabled until you add one.</p>
+  {% endif %}
+</div>

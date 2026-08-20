@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{% block title %}graindamage{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/css/app.css') }}" />
+    <script src="{{ url_for('static', path='/js/htmx.min.js') }}" defer></script>
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href="/">grain<span>damage</span></a>
+      <p class="tagline">
+        Encoding settings for AV1 and x265, informed by how the film was actually shot.
+      </p>
+    </header>
+
+    <main>{% block content %}{% endblock %}</main>
+
+    <footer class="site-footer">
+      <p>graindamage v{{ version }}</p>
+      <p class="muted">
+        This product uses the TMDB API but is not endorsed or certified by TMDB.
+        Not affiliated with IMDb.
+      </p>
+    </footer>
+  </body>
+</html>

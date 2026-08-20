@@ -1,0 +1,59 @@
+[project]
+name = "graindamage"
+version = "0.1.0"
+description = "Grain-aware AV1 and x265 encoding advice from IMDb technical specs and your own source file"
+readme = "README.md"
+requires-python = ">=3.13"
+license = "MIT"
+authors = [{ name = "Nick Rosier" }]
+dependencies = [
+    "fastapi>=0.141.1",
+    "uvicorn[standard]>=0.52.4",
+    "jinja2>=3.1.6",
+    "pydantic-settings>=2.15.0",
+    # httpx2 is the maintained successor to httpx 0.x and what starlette's
+    # TestClient now expects; it also becomes the TMDB client in milestone 2.
+    "httpx2>=2.12.0",
+    "python-multipart>=0.0.32",  # required by FastAPI for Form() parsing
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.16.3",
+    "mypy>=2.3.1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # bugbear
+    "SIM", # simplify
+    "C4",  # comprehensions
+    "RUF",
+]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+warn_unreachable = true
+disallow_untyped_defs = true

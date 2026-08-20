@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+
+{% block content %}
+<ol class="steps" aria-label="Progress">
+  <li class="current">Find the film</li>
+  <li>Confirm and add source specs</li>
+  <li>Get AV1 and x265 settings</li>
+</ol>
+
+<section class="card">
+  <h2>Find the film</h2>
+  <form class="search-form" hx-post="/search" hx-target="#results" hx-indicator="#spinner">
+    <label class="sr-only" for="query">Movie title</label>
+    <input
+      id="query"
+      name="query"
+      type="search"
+      placeholder="e.g. Blade Runner"
+      autocomplete="off"
+      autofocus
+      required
+    />
+    <button type="submit">Search</button>
+    <span id="spinner" class="spinner" aria-hidden="true">searching…</span>
+  </form>
+</section>
+
+<section id="results" aria-live="polite"></section>
+
+<section class="card status">
+  <h2>Configuration</h2>
+  <ul class="capabilities">
+    <li class="{{ 'on' if capabilities.tmdb_search else 'off' }}">
+      <strong>TMDB search</strong>
+      <span>{{ "configured" if capabilities.tmdb_search else "set TMDB_API_KEY to enable" }}</span>
+    </li>
+    <li class="{{ 'on' if capabilities.gemini_advice else 'off' }}">
+      <strong>Gemini advice</strong>
+      <span>
+        {{ "configured" if capabilities.gemini_advice
+           else "set GEMINI_API_KEY to enable (baseline rules still work without it)" }}
+      </span>
+    </li>
+    <li class="{{ 'on' if capabilities.imdb_technical_fetcher else 'off' }}">
+      <strong>IMDb technical fetcher</strong>
+      <span>
+        {{ "configured" if capabilities.imdb_technical_fetcher
+           else "optional — you can paste the /technical page source instead" }}
+      </span>
+    </li>
+  </ul>
+</section>
+{% endblock %}

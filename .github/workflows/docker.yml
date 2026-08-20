@@ -1,0 +1,101 @@
+name: docker
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE_NAME: graindamage
+
+jobs:
+  build:
+    name: build and push
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to Docker Hub
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Derive image tags
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          # Falls back to a dummy namespace so pull requests without secrets still build.
+          images: ${{ secrets.DOCKERHUB_USERNAME || 'local' }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,format=short,prefix=
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      # Single-arch build first: it can be loaded into the runner's daemon and
+      # actually started, so a broken image never reaches the `latest` tag.
+      - name: Build for smoke test
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: ${{ env.IMAGE_NAME }}:smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test the image
+        run: |
+          docker run -d --name smoke -p 8080:8080 "$IMAGE_NAME:smoke"
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8080/healthz -o healthz.json; then break; fi
+            sleep 1
+          done
+          if ! python3 -c "import json,sys; sys.exit(0 if json.load(open('healthz.json'))['status'] == 'ok' else 1)"; then
+            echo "::error::/healthz never reported ok — not pushing this build"
+            docker logs smoke
+            exit 1
+          fi
+          cat healthz.json
+          docker rm -f smoke
+
+      - name: Build and push
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          # Keeps Docker Hub showing two real architectures instead of extra
+          # "unknown/unknown" attestation entries.
+          provenance: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Summarise pushed tags
+        if: github.event_name != 'pull_request'
+        run: |
+          {
+            echo "### Pushed to Docker Hub"
+            echo
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
