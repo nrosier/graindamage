@@ -35,7 +35,6 @@ from app.models import (
     VideoTrack,
 )
 from app.providers.gemini import GeminiClient
-from app.providers.imdb import ImdbTechnicalProvider
 from app.providers.tmdb import TmdbClient
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -58,7 +57,6 @@ def make_settings(**overrides: Any) -> Settings:
     defaults: dict[str, Any] = {
         "tmdb_api_key": None,
         "gemini_api_key": None,
-        "imdb_fetcher_url": None,
         "cache_ttl_seconds": 3600,
     }
     return Settings(
@@ -164,7 +162,6 @@ def make_app(
     settings: Settings,
     *,
     tmdb: httpx2.AsyncClient | None = None,
-    imdb: httpx2.AsyncClient | None = None,
     gemini: httpx2.AsyncClient | None = None,
 ) -> FastAPI:
     """The real app, with mock transports pushed into whichever providers a test uses.
@@ -176,8 +173,6 @@ def make_app(
     services = app.state.services
     if tmdb is not None:
         services.tmdb = TmdbClient(settings, client=tmdb)
-    if imdb is not None:
-        services.imdb = ImdbTechnicalProvider(settings, client=imdb)
     if gemini is not None:
         services.gemini = GeminiClient(settings, client=gemini)
     return app

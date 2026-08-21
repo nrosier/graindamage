@@ -18,7 +18,6 @@ from fastapi.templating import Jinja2Templates
 from app import __version__
 from app.config import Settings, get_settings
 from app.providers.gemini import GeminiClient
-from app.providers.imdb import ImdbTechnicalProvider
 from app.providers.tmdb import TmdbClient
 from app.routes import Services, create_router
 
@@ -42,7 +41,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         settings=settings,
         templates=templates,
         tmdb=TmdbClient(settings),
-        imdb=ImdbTechnicalProvider(settings),
         gemini=GeminiClient(settings),
     )
 

@@ -1,32 +1,16 @@
-"""IMDb ``/technical``: parsing three page layouts, and the optional fetcher.
+"""IMDb ``/technical``: reading the rows out of the four shapes they arrive in.
 
-The parser is the part that matters — a pasted page is the documented path and the
-only one that works without configuration — so it gets a fixture per layout IMDb has
-shipped. The fetcher tests are about the contract an operator has to implement.
+Nothing here touches the network — the app never requests IMDb. Three of the four
+layouts are pages IMDb has shipped, and the fourth is the one a user actually produces:
+the formatted text you get by selecting the specifications and copying them.
 """
 
 from __future__ import annotations
 
-import json
-from typing import Any
-
-import httpx2
 import pytest
 
-from app.providers import ProviderDisabled, ProviderUnavailable
-from app.providers.imdb import ImdbTechnicalProvider, parse_technical
-from tests.support import Handler, fixture, make_settings, mock_client, recording_handler, run
-
-FETCHER_URL = "https://fetcher.example/get"
-BROWSERLESS_URL = "http://192.168.1.2:3579/content"
-BYPARR_URL = "http://192.168.1.2:8191/v1"
-TECHNICAL_URL = "https://www.imdb.com/title/tt0083658/technical/"
-
-
-def provider(handler: Handler, **overrides: Any) -> ImdbTechnicalProvider:
-    settings = make_settings(**{"imdb_fetcher_url": FETCHER_URL, **overrides})
-    return ImdbTechnicalProvider(settings, client=mock_client(handler))
-
+from app.providers.imdb import parse_technical, specs_from_rows
+from tests.support import fixture
 
 # --- the JSON island (current IMDb) -----------------------------------------
 
@@ -182,425 +166,151 @@ def test_unknown_rows_are_ignored() -> None:
     assert specs.runtimes == []
 
 
-# --- the fetcher -------------------------------------------------------------
-
-
-def test_without_a_fetcher_url_the_paste_path_is_named() -> None:
-    client = ImdbTechnicalProvider(
-        make_settings(), client=mock_client(lambda request: httpx2.Response(200, text="x"))
-    )
-
-    assert not client.enabled
-    with pytest.raises(ProviderDisabled, match="Paste the /technical page source instead"):
-        run(client.fetch("tt0083658"))
-
-
-@pytest.mark.parametrize("imdb_id", ["nope", "tt123", "0083658", "tt0083658/technical", ""])
-def test_only_a_real_title_id_is_ever_requested(imdb_id: str) -> None:
-    handler, seen = recording_handler(httpx2.Response(200, text="<html></html>"))
-
-    with pytest.raises(ProviderUnavailable, match="is not an IMDb title id"):
-        run(provider(handler).fetch(imdb_id))
-    assert seen == []
-
-
-def test_the_fetcher_is_asked_for_the_technical_url() -> None:
-    handler, seen = recording_handler(httpx2.Response(200, text="<html>page</html>"))
-
-    assert run(provider(handler).fetch("tt0083658")) == "<html>page</html>"
-
-    assert str(seen[0].url).startswith(FETCHER_URL)
-    assert dict(seen[0].url.params) == {"url": TECHNICAL_URL}
-    assert seen[0].headers["user-agent"].startswith("graindamage/")
-    assert "authorization" not in seen[0].headers
-
-
-def test_a_configured_token_is_sent_as_a_bearer() -> None:
-    handler, seen = recording_handler(httpx2.Response(200, text="<html>page</html>"))
-
-    run(provider(handler, imdb_fetcher_token="s3cret").fetch("tt0083658"))
-
-    assert seen[0].headers["authorization"] == "Bearer s3cret"
-
-
-@pytest.mark.parametrize("key", ["content", "html", "body", "data", "result", "text"])
-def test_a_json_envelope_is_unwrapped(key: str) -> None:
-    # browserless, most scraping APIs and a hand-written Worker all differ here.
-    handler, _ = recording_handler(httpx2.Response(200, json={key: "<html>page</html>"}))
-
-    assert run(provider(handler).fetch("tt0083658")) == "<html>page</html>"
-
-
-def test_a_bare_json_string_is_accepted_too() -> None:
-    handler, _ = recording_handler(httpx2.Response(200, json="<html>page</html>"))
-
-    assert run(provider(handler).fetch("tt0083658")) == "<html>page</html>"
-
-
-def test_an_unrecognised_json_envelope_is_passed_through_as_text() -> None:
-    # Better to hand the parser something it will report as empty than to guess.
-    handler, _ = recording_handler(httpx2.Response(200, json={"pageSource": "<html/>"}))
-
-    assert run(provider(handler).fetch("tt0083658")) == '{"pageSource":"<html/>"}'
-
-
-def test_html_that_looks_like_json_is_left_alone() -> None:
-    body = '{"content": "not really json-typed"}'
-    handler, _ = recording_handler(
-        httpx2.Response(200, text=body, headers={"content-type": "text/html; charset=utf-8"})
-    )
-
-    assert run(provider(handler).fetch("tt0083658")) == body
-
-
-def test_an_http_failure_from_the_fetcher_is_reported() -> None:
-    handler, _ = recording_handler(httpx2.Response(502, text="Bad Gateway"))
-
-    with pytest.raises(ProviderUnavailable, match="returned HTTP 502"):
-        run(provider(handler).fetch("tt0083658"))
-
-
-def test_an_empty_body_is_a_failure_not_an_empty_page() -> None:
-    handler, _ = recording_handler(httpx2.Response(200, text="   \n  "))
-
-    with pytest.raises(ProviderUnavailable, match="returned an empty body"):
-        run(provider(handler).fetch("tt0083658"))
-
-
-def test_a_transport_failure_names_the_kind() -> None:
-    def handler(request: httpx2.Request) -> httpx2.Response:
-        raise httpx2.ReadTimeout("too slow")
-
-    with pytest.raises(ProviderUnavailable) as caught:
-        run(provider(handler).fetch("tt0083658"))
-
-    assert caught.value.message == "Could not reach the IMDb fetcher."
-    assert caught.value.detail == "ReadTimeout"
-
-
-# --- the fetcher: browserless ------------------------------------------------
-
-
-def sent_body(request: httpx2.Request) -> dict[str, Any]:
-    payload: Any = json.loads(request.content)
-    assert isinstance(payload, dict)
-    return payload
-
-
-def test_a_browserless_url_is_posted_to_with_the_target_in_the_body() -> None:
-    handler, seen = recording_handler(httpx2.Response(200, text="<html>page</html>"))
-    client = provider(handler, imdb_fetcher_url=BROWSERLESS_URL)
-
-    assert run(client.fetch("tt0083658")) == "<html>page</html>"
-
-    request = seen[0]
-    # browserless serves HTML on POST-with-a-body only. There is no ?url= route on it
-    # to configure, so recognising the endpoint is the app's job.
-    assert request.method == "POST"
-    assert str(request.url) == BROWSERLESS_URL
-    assert request.headers["content-type"] == "application/json"
-    assert sent_body(request)["url"] == TECHNICAL_URL
-
-
-def test_browserless_waits_for_the_document_rather_than_for_the_ad_trackers() -> None:
-    handler, seen = recording_handler(httpx2.Response(200, text="<html>page</html>"))
-    client = provider(handler, imdb_fetcher_url=BROWSERLESS_URL, imdb_fetcher_timeout_seconds=20.0)
-
-    run(client.fetch("tt0083658"))
-
-    goto = sent_body(seen[0])["gotoOptions"]
-    # __NEXT_DATA__ is in the initial HTML; networkidle would only wait for IMDb's ads.
-    assert goto["waitUntil"] == "domcontentloaded"
-    # 90% of the HTTP timeout, in ms: Chrome reports the failure rather than having the
-    # connection cut from under it.
-    assert goto["timeout"] == 18_000
-
-
-def test_a_bare_host_and_port_means_the_content_endpoint() -> None:
-    # How anyone writes their instance down: the port, and nothing after it.
-    handler, seen = recording_handler(httpx2.Response(200, text="<html>page</html>"))
-
-    run(provider(handler, imdb_fetcher_url="http://192.168.1.2:3579").fetch("tt0083658"))
-
-    assert str(seen[0].url) == BROWSERLESS_URL
-
-
-def test_browserless_takes_its_token_in_the_query_string_as_well() -> None:
-    handler, seen = recording_handler(httpx2.Response(200, text="<html>page</html>"))
-    client = provider(handler, imdb_fetcher_url=BROWSERLESS_URL, imdb_fetcher_token="s3cret")
-
-    run(client.fetch("tt0083658"))
-
-    # v1 reads only ?token=, v2 reads either, and a reverse proxy in front may want the
-    # header — so both carry it.
-    assert dict(seen[0].url.params)["token"] == "s3cret"
-    assert seen[0].headers["authorization"] == "Bearer s3cret"
-
-
-def test_the_unblock_endpoint_is_asked_for_content_and_unwrapped() -> None:
-    handler, seen = recording_handler(
-        httpx2.Response(200, json={"content": "<html>page</html>", "cookies": [], "ttl": 0})
-    )
-    client = provider(handler, imdb_fetcher_url="http://192.168.1.2:3579/unblock")
-
-    assert run(client.fetch("tt0083658")) == "<html>page</html>"
-
-    # /unblock drives the stealth browser and answers in JSON; it takes no gotoOptions.
-    assert sent_body(seen[0]) == {"url": TECHNICAL_URL, "content": True}
-
-
-def test_a_query_string_already_on_the_fetcher_url_survives() -> None:
-    handler, seen = recording_handler(httpx2.Response(200, text="<html>page</html>"))
-
-    run(provider(handler, imdb_fetcher_url=f"{FETCHER_URL}?api_key=k").fetch("tt0083658"))
-
-    assert dict(seen[0].url.params) == {"api_key": "k", "url": TECHNICAL_URL}
+# --- the formatted text, which is what a user actually pastes ----------------
+
+# The technical page as it reads on screen, furniture and all.
+PASTED_PAGE = """Blade Runner
+Technical specifications
+Edit
+Runtime
+1 hour 57 minutes
+Sound mix
+Dolby Stereo
+70 mm 6-Track
+Color
+Color
+Aspect ratio
+2.20 : 1
+Camera
+Panavision Panaflex, Joe Dunton Cooke Lenses
+Negative format
+35 mm
+Cinematographic process
+Super 35
+Printed film format
+70 mm (blow-up)
+Film length
+3,175 m
+Laboratory
+Technicolor, Hollywood, USA
+More to explore
+Recently viewed
+"""
+
+
+def test_the_formatted_specifications_parse_like_a_page() -> None:
+    specs = parse_technical(PASTED_PAGE)
+
+    assert specs.negative_formats == ["35 mm"]
+    assert specs.cinematographic_processes == ["Super 35"]
+    assert specs.printed_formats == ["70 mm (blow-up)"]
+    assert specs.aspect_ratios == ["2.20 : 1"]
+    assert specs.sound_mixes == ["Dolby Stereo", "70 mm 6-Track"]
+    assert specs.film_lengths == ["3,175 m"]
+    assert specs.laboratories == ["Technicolor, Hollywood, USA"]
+    assert specs.runtimes == ["1 hour 57 minutes"]
+
+
+def test_the_colour_row_that_repeats_its_own_heading_keeps_its_value() -> None:
+    """IMDb's colour row reads "Color / Color", and the second one is the answer."""
+    assert parse_technical(PASTED_PAGE).colors == ["Color"]
 
 
 @pytest.mark.parametrize(
-    ("mode", "url", "method"),
+    "line",
     [
-        ("auto", BROWSERLESS_URL, "POST"),
-        ("auto", FETCHER_URL, "GET"),
-        # When the endpoint name guesses wrong, the setting decides.
-        ("query", BROWSERLESS_URL, "GET"),
-        ("browserless", FETCHER_URL, "POST"),
-        ("auto", BYPARR_URL, "POST"),
-        ("query", BYPARR_URL, "GET"),
-        ("flaresolverr", FETCHER_URL, "POST"),
+        "Aspect ratio: 2.39 : 1",
+        "Aspect ratio\t2.39 : 1",
+        "Aspect ratio  2.39 : 1",
+        "Aspect ratio 2.39 : 1",
+        "Aspect Ratio:\t2.39 : 1",
+        "aspect ratios  2.39 : 1",
     ],
 )
-def test_the_mode_setting_overrides_the_endpoint_name(mode: str, url: str, method: str) -> None:
-    handler, seen = recording_handler(httpx2.Response(200, text="<html>page</html>"))
-    client = provider(handler, imdb_fetcher_url=url, imdb_fetcher_mode=mode)
-
-    run(client.fetch("tt0083658"))
-
-    assert seen[0].method == method
-    # The target travels in the query string one way and in the body the other.
-    assert ("url" in dict(seen[0].url.params)) == (method == "GET")
+def test_a_heading_and_its_value_on_one_line(line: str) -> None:
+    assert parse_technical(line).aspect_ratios == ["2.39 : 1"]
 
 
-def test_browserless_is_given_a_plausible_browser_identity() -> None:
-    handler, seen = recording_handler(httpx2.Response(200, text="<html>page</html>"))
+@pytest.mark.parametrize("separator", ["\t", " · ", "   "])
+def test_values_sharing_a_line_are_separated(separator: str) -> None:
+    page = f"Sound mix{separator}Dolby Digital{separator}DTS{separator}SDDS"
 
-    run(provider(handler, imdb_fetcher_url=BROWSERLESS_URL).fetch("tt0083658"))
-
-    body = sent_body(seen[0])
-    # The Chrome browserless drives announces itself as HeadlessChrome, and IMDb's WAF
-    # answers that with a challenge page before anything else happens. The app's own
-    # User-Agent identifies the app to the operator; it is not what IMDb should see.
-    user_agent = body["userAgent"]["userAgent"]
-    assert user_agent.startswith("Mozilla/5.0")
-    assert "Headless" not in user_agent
-    assert body["setExtraHTTPHeaders"] == {"Accept-Language": "en-US,en;q=0.9"}
-    # A wait that times out should still yield the page it managed to load.
-    assert body["bestAttempt"] is True
+    assert parse_technical(page).sound_mixes == ["Dolby Digital", "DTS", "SDDS"]
 
 
-# --- the fetcher: Byparr and FlareSolverr ------------------------------------
+def test_page_furniture_after_the_rows_is_not_a_value() -> None:
+    specs = parse_technical(PASTED_PAGE)
+
+    assert "Recently viewed" not in specs.laboratories
+    assert "Edit" not in specs.runtimes
+    assert "Blade Runner" not in specs.runtimes
 
 
-def byparr_answer(page: str = "<html>page</html>") -> httpx2.Response:
-    """A Byparr ``/v1`` reply, shaped as its own LinkResponse model."""
-    return httpx2.Response(
-        200,
-        json={
-            "status": "ok",
-            "message": "Success",
-            "solution": {
-                "url": TECHNICAL_URL,
-                "status": 200,
-                "cookies": [],
-                "userAgent": "Mozilla/5.0",
-                "headers": {},
-                "response": page,
-                "contentType": "text/html",
-            },
-            "startTimestamp": 1,
-            "endTimestamp": 2,
-            "version": "2.0.0",
-        },
+def test_prose_after_a_row_ends_it() -> None:
+    page = (
+        "Negative format\n35 mm\n"
+        "This article about a film is a stub and you can help by expanding it today.\n"
     )
 
+    specs = parse_technical(page)
 
-def test_byparr_is_sent_the_flaresolverr_command() -> None:
-    handler, seen = recording_handler(byparr_answer())
-    client = provider(handler, imdb_fetcher_url=BYPARR_URL)
-
-    # The page arrives one level down, in solution.response.
-    assert run(client.fetch("tt0083658")) == "<html>page</html>"
-
-    request = seen[0]
-    assert request.method == "POST"
-    assert str(request.url) == BYPARR_URL
-    # maxTimeout covers solving the challenge as well as loading the page, so it gets
-    # 90% of the HTTP timeout (in ms) and gives up before the connection does.
-    assert sent_body(request) == {
-        "cmd": "request.get",
-        "url": TECHNICAL_URL,
-        "maxTimeout": 18_000,
-        # FlareSolverr keeps a browser per session name, so the token earned answering
-        # IMDb's challenge survives into the next attempt. Byparr ignores both fields.
-        "session": "graindamage-imdb",
-        "session_ttl_minutes": 30,
-    }
+    assert specs.negative_formats == ["35 mm"]
 
 
-def test_a_byparr_failure_envelope_is_repeated_rather_than_parsed() -> None:
-    # status "error" arrives with HTTP 200. Handing that to the parser would report a
-    # film with no technical specifications, which is a different thing entirely.
-    handler, _ = recording_handler(
-        httpx2.Response(
-            200,
-            json={
-                "status": "error",
-                "message": "Invalid request",
-                "solution": {"url": TECHNICAL_URL, "status": 500, "response": ""},
-            },
-        )
+def test_text_before_any_heading_is_never_a_value() -> None:
+    page = "Sign in\nWatchlist\nBlade Runner (1982)\nRuntime\n1 hour 57 minutes\n"
+
+    specs = parse_technical(page)
+
+    assert specs.runtimes == ["1 hour 57 minutes"]
+    assert specs.negative_formats == []
+
+
+def test_a_script_that_mentions_a_row_name_is_not_a_row() -> None:
+    page = "<script>var runtime = '117 min'; var aspectRatio = '2.20 : 1';</script>"
+
+    assert parse_technical(page).is_empty
+
+
+def test_the_markup_layouts_still_win_over_the_text_reading() -> None:
+    """A pasted page source has to parse as markup, not as prose that contains tags."""
+    specs = parse_technical(fixture("imdb_technical_markup.html"))
+
+    assert specs.negative_formats
+    assert not any("<" in value for value in specs.negative_formats)
+
+
+# --- rows that never came from a page at all ---------------------------------
+
+
+def test_rows_from_a_lookup_are_held_to_the_same_limits() -> None:
+    specs = specs_from_rows(
+        {
+            "aspect_ratios": ["2.39 : 1", "2.39 : 1", "  2.39 : 1  "],
+            "sound_mixes": [f"Mix {index}" for index in range(20)],
+            "cameras": ["x" * 500],
+            "laboratories": ["Deluxe, London, UK"],
+        }
     )
 
-    with pytest.raises(ProviderUnavailable, match="reported: Invalid request"):
-        run(provider(handler, imdb_fetcher_url=BYPARR_URL).fetch("tt0083658"))
+    assert specs.aspect_ratios == ["2.39 : 1"]
+    assert len(specs.sound_mixes) == 12
+    assert specs.cameras == []
+    assert specs.laboratories == ["Deluxe, London, UK"]
 
 
-def test_the_services_own_explanation_survives_an_http_error() -> None:
-    # Byparr answers 408 when a challenge outlasts maxTimeout, and explains itself in
-    # the body — worth more to the reader than the status code alone.
-    handler, _ = recording_handler(
-        httpx2.Response(
-            408, json={"detail": "Timed out while loading the page or solving the challenge"}
-        )
-    )
+def test_rows_a_lookup_invented_a_field_name_for_are_dropped() -> None:
+    specs = specs_from_rows({"resolution": ["4K"], "negative_formats": ["16 mm"]})
 
-    with pytest.raises(ProviderUnavailable) as caught:
-        run(provider(handler, imdb_fetcher_url=BYPARR_URL).fetch("tt0083658"))
-
-    assert caught.value.message == "The IMDb fetcher returned HTTP 408."
-    assert caught.value.detail is not None
-    assert caught.value.detail.startswith("Timed out while loading")
+    assert specs.negative_formats == ["16 mm"]
+    assert not hasattr(specs, "resolution")
 
 
-def test_a_flaresolverr_page_is_preferred_over_a_top_level_key() -> None:
-    # Some deployments sit behind a wrapper that adds its own envelope; the nested
-    # solution is the real page either way.
-    handler, _ = recording_handler(
-        httpx2.Response(
-            200,
-            json={
-                "status": "ok",
-                "message": "Success",
-                "data": "<html>wrapper</html>",
-                "solution": {"url": TECHNICAL_URL, "status": 200, "response": "<html>page</html>"},
-            },
-        )
-    )
+def test_values_that_are_not_strings_are_ignored() -> None:
+    specs = specs_from_rows({"runtimes": [117, None, "1 hour 57 minutes"]})  # type: ignore[list-item]
 
-    assert run(provider(handler, imdb_fetcher_url=BYPARR_URL).fetch("tt0083658")) == (
-        "<html>page</html>"
-    )
+    assert specs.runtimes == ["1 hour 57 minutes"]
 
 
-def test_fetch_specs_parses_and_caches() -> None:
-    handler, seen = recording_handler(
-        httpx2.Response(200, text=fixture("imdb_technical_next_data.html"))
-    )
-    client = provider(handler)
-
-    first = run(client.fetch_specs("tt0083658"))
-    second = run(client.fetch_specs("tt0083658"))
-
-    assert first.negative_formats == ["35 mm"]
-    # Previewing the specs and then asking for advice must not cost two fetches.
-    assert first is second
-    assert len(seen) == 1
-
-
-# --- the fetcher: a bot check instead of the page ----------------------------
-
-# What IMDb serves a fresh browser: the challenge script sets a token and reloads, so
-# the page itself never contains any specifications.
-AWS_WAF_CHALLENGE = """<!DOCTYPE html><html lang="en"><head><title></title>
-<script>window.awsWafCookieDomainList = ['imdb.com']; window.gokuProps = {"key":"AQID"};</script>
-<script src="https://x.token.awswaf.com/x/challenge.js"></script></head>
-<body><div id="challenge-container"></div>
-<script>AwsWafIntegration.getToken().then(() => window.location.reload(true));</script>
-</body></html>"""
-
-
-def sequence_handler(*responses: httpx2.Response) -> tuple[Handler, list[httpx2.Request]]:
-    """A handler that answers with each response in turn, repeating the last."""
-    seen: list[httpx2.Request] = []
-
-    def handler(request: httpx2.Request) -> httpx2.Response:
-        seen.append(request)
-        return responses[min(len(seen) - 1, len(responses) - 1)]
-
-    return handler, seen
-
-
-def test_a_bot_check_is_asked_again_and_the_second_answer_is_kept() -> None:
-    # Answering the challenge earns the fetcher's browser a token, which a fetcher with
-    # a session still holds next time — so the retry is the whole point.
-    handler, seen = sequence_handler(
-        byparr_answer(AWS_WAF_CHALLENGE),
-        byparr_answer('<html><script id="__NEXT_DATA__">{}</script></html>'),
-    )
-
-    page = run(provider(handler, imdb_fetcher_url=BYPARR_URL).fetch("tt0083658"))
-
-    assert "__NEXT_DATA__" in page
-    assert len(seen) == 2
-
-
-def test_a_bot_check_every_time_is_reported_rather_than_parsed() -> None:
-    # Parsing it would report a film with no technical specifications, which is a
-    # different thing entirely — and would be cached as if it were true.
-    handler, seen = sequence_handler(byparr_answer(AWS_WAF_CHALLENGE))
-
-    with pytest.raises(ProviderUnavailable) as caught:
-        run(
-            provider(handler, imdb_fetcher_url=BYPARR_URL, imdb_fetcher_attempts=2).fetch(
-                "tt0083658"
-            )
-        )
-
-    assert len(seen) == 2
-    assert caught.value.message.endswith("bot check instead of the technical page.")
-    assert caught.value.detail is not None
-    assert caught.value.detail.startswith("2 attempts met IMDb's AWS WAF")
-
-
-def test_one_attempt_is_one_request() -> None:
-    handler, seen = sequence_handler(byparr_answer(AWS_WAF_CHALLENGE))
-
-    with pytest.raises(ProviderUnavailable, match="bot check"):
-        run(
-            provider(handler, imdb_fetcher_url=BYPARR_URL, imdb_fetcher_attempts=1).fetch(
-                "tt0083658"
-            )
-        )
-
-    assert len(seen) == 1
-
-
-def test_a_page_with_specs_in_it_is_never_called_a_bot_check() -> None:
-    # A real page that happens to mention a challenge script is still the real page.
-    page = f'<html><script id="__NEXT_DATA__">{{}}</script>{AWS_WAF_CHALLENGE}</html>'
-    handler, seen = sequence_handler(byparr_answer(page))
-
-    assert run(provider(handler, imdb_fetcher_url=BYPARR_URL).fetch("tt0083658")) == page
-    assert len(seen) == 1
-
-
-def test_a_cloudflare_interstitial_is_recognised_too() -> None:
-    handler, _ = sequence_handler(
-        httpx2.Response(200, text="<html><head><title>Just a moment...</title></head></html>")
-    )
-
-    with pytest.raises(ProviderUnavailable) as caught:
-        run(provider(handler, imdb_fetcher_attempts=1).fetch("tt0083658"))
-
-    assert caught.value.detail is not None
-    assert caught.value.detail.startswith("1 attempt met a JavaScript bot check")
+def test_no_rows_at_all_is_empty_specs_not_an_error() -> None:
+    assert specs_from_rows({}).is_empty

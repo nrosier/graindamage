@@ -22,6 +22,11 @@ corrupted ``master-display`` string would silently ruin the encode.
 Any failure at all — no key, timeout, refusal, truncated JSON, schema mismatch —
 returns the baseline with a warning. There is no path where a Gemini problem costs
 the user their advice.
+
+This module has one other job: :meth:`GeminiClient.technical_specs` asks for a film's
+IMDb ``/technical`` rows, because IMDb's WAF means the app cannot read that page
+itself. That answer is a recollection, not a scrape, so it is labelled as one
+everywhere it appears — on the page, and in the context this module later sends back.
 """
 
 from __future__ import annotations
@@ -29,6 +34,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from dataclasses import dataclass
 from typing import Any
 
 import httpx2
@@ -55,8 +61,11 @@ from app.models import (
     Encoder,
     EncodeRequest,
     EncoderPlan,
+    SpecsSource,
+    TechnicalSpecs,
 )
-from app.providers import ProviderDisabled, ProviderUnavailable
+from app.providers import ProviderDisabled, ProviderRejected, ProviderUnavailable
+from app.providers.imdb import SPEC_LABELS, specs_from_rows
 
 # --- limits on what the model can put on the page ---------------------------
 
@@ -68,6 +77,13 @@ MAX_RATIONALE = 6
 MAX_OVERVIEW_CHARS = 600
 
 _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+_CODE_FENCE = re.compile(r"```(?:json)?\s*(?P<body>.*?)```", re.DOTALL)
+
+# Appended to a system prompt when the API will not let us ask for JSON properly.
+_JSON_ONLY = (
+    "Reply with a single JSON object matching the fields described above, and "
+    "nothing else: no prose before or after it, no markdown code fence."
+)
 _WHITESPACE = re.compile(r"\s+")
 
 # --- the structured-output contract -----------------------------------------
@@ -113,6 +129,57 @@ RESPONSE_SCHEMA: dict[str, Any] = {
     },
     "required": ["summary", "plans"],
 }
+
+# One row per TechnicalSpecs field, described by the label IMDb prints above it.
+_ROW_DESCRIPTIONS: dict[str, str] = {
+    "negative_formats": 'Negative format, e.g. "35 mm", "65 mm", "Digital"',
+    "cinematographic_processes": 'Cinematographic process, e.g. "Super 35", "Spherical"',
+    "printed_formats": 'Printed film format, e.g. "35 mm", "D-Cinema"',
+    "cameras": "Camera and lens names, verbatim",
+    "aspect_ratios": 'Aspect ratio, exactly as IMDb writes it, e.g. "2.39 : 1"',
+    "film_lengths": 'Film length, with its unit, e.g. "3,024 m"',
+    "colors": 'Color, e.g. "Color", "Black and White"',
+    "laboratories": "Laboratory names, with their locations",
+    "sound_mixes": 'Sound mix, e.g. "Dolby Digital", "DTS"',
+    "runtimes": "Runtime as IMDb lists it",
+}
+
+TECHNICAL_SCHEMA: dict[str, Any] = {
+    "type": "OBJECT",
+    "properties": {
+        **{
+            field: {"type": "ARRAY", "items": {"type": "STRING"}, "description": description}
+            for field, description in _ROW_DESCRIPTIONS.items()
+        },
+        "confidence": {
+            "type": "STRING",
+            "enum": ["high", "medium", "low"],
+            "description": "How sure you are that these are the rows IMDb actually lists",
+        },
+    },
+    "required": ["confidence"],
+}
+
+TECHNICAL_PROMPT = f"""\
+You look up the technical specifications a film has on its IMDb /technical page and \
+return them as data. You are given a title, a year and an IMDb title id, and the id is \
+authoritative: if the title you know for that id differs, answer for the id.
+
+Return only the rows IMDb lists: {", ".join(sorted(SPEC_LABELS))}.
+
+Rules you must follow:
+
+1. An empty list is the right answer for a row you do not know. These rows decide how a \
+film's grain is encoded, so a plausible-looking guess is worse than nothing — a missing \
+row falls back to a documented heuristic, while a wrong one silently misdirects it.
+2. Values verbatim, in IMDb's own spelling and spacing: "2.39 : 1", not "2.39:1"; \
+"35 mm", not "35mm". One list entry per row value.
+3. No prose, no commentary, no explanation, no uncertainty hedges inside the values.
+4. Report confidence honestly: "high" only for a film whose page you clearly recall or \
+have just read, "low" if you are reconstructing it from what the film is generally known \
+to be. Do not inflate it.
+5. Never invent a camera, laboratory or process to fill a row out.
+"""
 
 SYSTEM_PROMPT = f"""\
 You are a video encoding engineer reviewing a proposed archival re-encode of a film. \
@@ -200,6 +267,30 @@ def _params_from_pairs(value: object) -> dict[str, str]:
     return params
 
 
+@dataclass(frozen=True, slots=True)
+class SpecsLookup:
+    """Technical rows Gemini recalled, with how much it trusts them.
+
+    The confidence travels with the rows because it is the difference between "these
+    are IMDb's rows" and "these are what the film is generally said to be", and only
+    the user can decide whether that is good enough to encode from.
+    """
+
+    specs: TechnicalSpecs
+    confidence: str
+    grounded: bool
+
+    @property
+    def caveat(self) -> str:
+        """One line for the page: where these rows came from, and what to do about it."""
+        how = "found by searching the web" if self.grounded else "recalled from training data"
+        return (
+            f"These rows were {how} by Gemini, not read from IMDb — confidence "
+            f"{self.confidence}. Check them against the technical page, and paste it "
+            "below if anything is wrong."
+        )
+
+
 def _uses_synthesis(plan: EncoderPlan) -> bool:
     strength = plan.params.get("film-grain")
     if not strength or strength == "0":
@@ -246,7 +337,68 @@ class GeminiClient:
 
         return merge_advice(baseline, payload, request)
 
+    async def technical_specs(
+        self, imdb_id: str, *, title: str | None = None, year: int | None = None
+    ) -> SpecsLookup:
+        """Ask Gemini for the film's IMDb ``/technical`` rows.
+
+        Raises :class:`ProviderDisabled` without a key and :class:`ProviderUnavailable`
+        if the lookup fails. A model that answers honestly that it does not know the
+        page returns empty rows, which is a success — the caller falls back to the
+        paste box and the year-based heuristic.
+        """
+        if not self.enabled:
+            raise ProviderDisabled(
+                "Looking up the technical rows needs a Gemini key (GEMINI_API_KEY). "
+                "Paste the technical page instead — that always works."
+            )
+
+        grounded = self._settings.gemini_web_grounding
+        try:
+            payload = await self._specs_payload(imdb_id, title, year, grounded=grounded)
+        except ProviderRejected:
+            if not grounded:
+                raise
+            # Search grounding is a per-model feature. If this model has not got it,
+            # the answer is worth less but is still worth having.
+            grounded = False
+            payload = await self._specs_payload(imdb_id, title, year, grounded=False)
+
+        confidence = payload.get("confidence")
+        return SpecsLookup(
+            specs=specs_from_rows(
+                {field: _as_list(payload.get(field)) for field in TechnicalSpecs.model_fields}
+            ),
+            confidence=confidence if confidence in {"high", "medium", "low"} else "low",
+            grounded=grounded,
+        )
+
     # --- internals ---------------------------------------------------------
+
+    async def _specs_payload(
+        self, imdb_id: str, title: str | None, year: int | None, *, grounded: bool
+    ) -> dict[str, Any]:
+        named = f"{title} ({year})" if title and year else title or "the film"
+        question = (
+            f"Fetch the technical specifications of {named}, IMDb id {imdb_id}, from "
+            f"IMDb: https://www.imdb.com/title/{imdb_id}/technical/"
+        )
+        key = hashlib.sha256(
+            f"specs|{self._settings.gemini_model}|{grounded}|{question}".encode()
+        ).hexdigest()
+        return await self._cache.get_or_set(
+            key,
+            lambda: self._generate(
+                question,
+                system=TECHNICAL_PROMPT,
+                # Grounding and structured output are mutually exclusive, so a grounded
+                # lookup asks for JSON in words and is parsed leniently.
+                schema=None if grounded else TECHNICAL_SCHEMA,
+                tools=[{"google_search": {}}] if grounded else None,
+                # A lookup is recall, not judgement: nothing here wants variation.
+                temperature=0.0,
+            ),
+        )
 
     async def _advice_payload(self, request: EncodeRequest, baseline: Advice) -> dict[str, Any]:
         context = build_context(request, baseline)
@@ -254,9 +406,25 @@ class GeminiClient:
         key = hashlib.sha256(
             f"{self._settings.gemini_model}|{self._settings.gemini_temperature}|{body}".encode()
         ).hexdigest()
-        return await self._cache.get_or_set(key, lambda: self._generate(body))
+        return await self._cache.get_or_set(
+            key, lambda: self._generate(body, system=SYSTEM_PROMPT, schema=RESPONSE_SCHEMA)
+        )
 
-    async def _generate(self, user_text: str) -> dict[str, Any]:
+    async def _generate(
+        self,
+        user_text: str,
+        *,
+        system: str,
+        schema: dict[str, Any] | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        temperature: float | None = None,
+    ) -> dict[str, Any]:
+        """POST one ``generateContent`` call and return the JSON object it answered.
+
+        With ``schema`` the model is held to structured output. With ``tools`` it is
+        not — the API refuses both at once — so the JSON is dug out of whatever prose
+        came with it instead.
+        """
         if not self._settings.gemini_api_key:
             raise ProviderDisabled("Gemini advice is not configured. Set GEMINI_API_KEY.")
 
@@ -270,16 +438,24 @@ class GeminiClient:
             "User-Agent": self._settings.user_agent,
             "x-goog-api-key": self._settings.gemini_api_key,
         }
-        request_body: dict[str, Any] = {
-            "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
-            "contents": [{"role": "user", "parts": [{"text": user_text}]}],
-            "generationConfig": {
-                "temperature": self._settings.gemini_temperature,
-                "maxOutputTokens": self._settings.gemini_max_output_tokens,
-                "responseMimeType": "application/json",
-                "responseSchema": RESPONSE_SCHEMA,
-            },
+        generation: dict[str, Any] = {
+            "temperature": (
+                self._settings.gemini_temperature if temperature is None else temperature
+            ),
+            "maxOutputTokens": self._settings.gemini_max_output_tokens,
         }
+        if schema is not None:
+            generation["responseMimeType"] = "application/json"
+            generation["responseSchema"] = schema
+
+        instruction = system if schema is not None else f"{system}\n{_JSON_ONLY}"
+        request_body: dict[str, Any] = {
+            "systemInstruction": {"parts": [{"text": instruction}]},
+            "contents": [{"role": "user", "parts": [{"text": user_text}]}],
+            "generationConfig": generation,
+        }
+        if tools:
+            request_body["tools"] = tools
 
         try:
             if self._client is not None:
@@ -293,9 +469,10 @@ class GeminiClient:
             raise ProviderUnavailable("Could not reach Gemini.", detail=type(exc).__name__) from exc
 
         if response.status_code in {400, 403}:
-            raise ProviderUnavailable(
+            raise ProviderRejected(
                 f"Gemini rejected the request ({response.status_code}) — usually an "
-                "invalid API key or a model name your key cannot use."
+                "invalid API key, a model name your key cannot use, or a feature this "
+                "model does not have."
             )
         if response.status_code == 404:
             raise ProviderUnavailable(
@@ -311,11 +488,15 @@ class GeminiClient:
         except ValueError as exc:
             raise ProviderUnavailable("Gemini returned a response that was not JSON.") from exc
 
-        return _extract_payload(_as_dict(envelope))
+        return _extract_payload(_as_dict(envelope), lenient=schema is None)
 
 
-def _extract_payload(envelope: dict[str, Any]) -> dict[str, Any]:
-    """Pull the JSON object out of Gemini's ``candidates[0].content.parts``."""
+def _extract_payload(envelope: dict[str, Any], *, lenient: bool = False) -> dict[str, Any]:
+    """Pull the JSON object out of Gemini's ``candidates[0].content.parts``.
+
+    ``lenient`` is for answers that could not be schema-constrained: the object is
+    fished out of a code fence or a sentence rather than being the whole reply.
+    """
     block_reason = _as_dict(envelope.get("promptFeedback")).get("blockReason")
     if isinstance(block_reason, str) and block_reason:
         raise ProviderUnavailable(f"Gemini declined to answer ({block_reason}).")
@@ -344,7 +525,7 @@ def _extract_payload(envelope: dict[str, Any]) -> dict[str, Any]:
         raise ProviderUnavailable("Gemini returned an empty answer.")
 
     try:
-        payload = json.loads(text)
+        payload = json.loads(_only_json(text) if lenient else text)
     except ValueError as exc:
         raise ProviderUnavailable("Gemini's answer was not the JSON it was asked for.") from exc
     if not isinstance(payload, dict):
@@ -352,7 +533,24 @@ def _extract_payload(envelope: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def _only_json(text: str) -> str:
+    """The outermost JSON object in a reply that was allowed to say more than JSON."""
+    if fenced := _CODE_FENCE.search(text):
+        text = fenced.group("body")
+    start, end = text.find("{"), text.rfind("}")
+    return text[start : end + 1] if 0 <= start < end else text
+
+
 # --- prompt context ---------------------------------------------------------
+
+
+_SPECS_PROVENANCE: dict[SpecsSource | None, str] = {
+    SpecsSource.PASTED: "pasted from IMDb's technical page by the user — authoritative",
+    SpecsSource.GEMINI: (
+        "recalled by a language model that was asked for the IMDb page, not read from "
+        "IMDb — treat as unverified and say so if a row looks wrong for this film"
+    ),
+}
 
 
 def build_context(request: EncodeRequest, baseline: Advice) -> dict[str, Any]:
@@ -405,6 +603,10 @@ def build_context(request: EncodeRequest, baseline: Advice) -> dict[str, Any]:
     }
     if specs:
         context["imdb_technical"] = specs
+        # Where the rows came from changes how far they can be leant on, and the model
+        # is not told to trust its own earlier recollection as though it were IMDb.
+        if (origin := _SPECS_PROVENANCE.get(request.specs_source)) is not None:
+            context["imdb_technical_source"] = origin
 
     media = request.source
     source: dict[str, Any] = {

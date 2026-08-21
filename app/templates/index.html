@@ -53,11 +53,12 @@
            else "set GEMINI_API_KEY to enable (baseline rules still work without it)" }}
       </span>
     </li>
-    <li class="{{ 'on' if capabilities.imdb_technical_fetcher else 'off' }}">
-      <strong>IMDb technical fetcher</strong>
+    <li class="{{ 'on' if capabilities.imdb_technical_lookup else 'off' }}">
+      <strong>IMDb technical look-up</strong>
       <span>
-        {{ "configured" if capabilities.imdb_technical_fetcher
-           else "optional — you can paste the /technical page source instead" }}
+        {{ "rides on the Gemini key — always check its rows against the page"
+           if capabilities.imdb_technical_lookup
+           else "needs GEMINI_API_KEY — you can paste the specifications instead" }}
       </span>
     </li>
   </ul>

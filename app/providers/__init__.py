@@ -1,4 +1,4 @@
-"""Outbound integrations: TMDB, the IMDb ``/technical`` page, and Gemini.
+"""Outbound integrations: TMDB and Gemini.
 
 Every provider raises :class:`ProviderError` for anything the user should see. The
 distinction that matters at the route layer is *disabled* (no key configured — show
@@ -26,4 +26,12 @@ class ProviderUnavailable(ProviderError):
     """The integration was attempted and failed (network, status, or bad payload)."""
 
 
-__all__ = ["ProviderDisabled", "ProviderError", "ProviderUnavailable"]
+class ProviderRejected(ProviderUnavailable):
+    """The request itself was refused — a bad key, or a feature this model lacks.
+
+    Separate because retrying it unchanged is pointless, while retrying it *changed*
+    (without an optional feature the model turned out not to support) is exactly right.
+    """
+
+
+__all__ = ["ProviderDisabled", "ProviderError", "ProviderRejected", "ProviderUnavailable"]

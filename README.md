@@ -31,8 +31,9 @@ Three steps in one page, each swapped in over HTMX:
 
 1. **Find the film.** TMDB search (IMDb has no public API); the hit you pick supplies
    its `imdb_id`, which is what finds the negative format.
-2. **Describe the source.** Paste `ffprobe`, `mkvinfo` or `mediainfo` output and the
-   IMDb `/technical` page source. Every field is overridable by hand.
+2. **Describe the source.** Paste `ffprobe`, `mkvinfo` or `mediainfo` output. The
+   IMDb technical rows arrive from a Gemini look-up, or you paste those too. Every
+   field is overridable by hand.
 3. **Get the settings.** Two plans — SVT-AV1 and x265 — each with a CRF derived from a
    resolution anchor and named adjustments, a preset, a validated parameter string, a
    HandBrake command, an FFmpeg command, and a downloadable HandBrake preset.
@@ -98,133 +99,54 @@ fill the gap by hand.
 ## IMDb technical specifications
 
 Aspect ratio, negative format, cinematographic process and printed film format come
-from the film's `/technical` page. Since April 2026 IMDb has a WAF in front of the
-site, so **the app never scrapes it**. Two ways to get the data in:
+from the film's `/technical` page, and they are what decide the grain settings. Since
+April 2026 IMDb has an AWS WAF in front of the site that answers anything automated
+with a JavaScript challenge, so **the app never requests imdb.com**. The rows arrive
+one of two other ways.
 
-- **Paste the page source.** Open `https://www.imdb.com/title/tt0083658/technical`,
-  view source, paste. Both the current `__NEXT_DATA__` payload and the older markup are
-  parsed. This always works and needs no configuration.
-- **Point `IMDB_FETCHER_URL` at a fetcher you run.** Byparr, FlareSolverr, a browserless
-  instance, a proxy, or anything cookie-bearing you control. Three wire contracts are
-  spoken, and the endpoint name in the URL picks one:
+### Ask Gemini for them
 
-  - `http://192.168.1.2:8191/v1` → `POST {"cmd": "request.get", "url": "…/technical/",
-    "maxTimeout": …}` — Byparr and FlareSolverr
-  - `http://192.168.1.2:3579/content` → `POST {"url": "…/technical/", "gotoOptions": {…}}`
-  - `http://192.168.1.2:3579/unblock` → `POST {"url": "…/technical/", "content": true}`
-  - `http://192.168.1.2:3579` → the same as `/content`; a bare `host:port` is taken as a
-    browserless instance
-  - `https://proxy.example/get` → `GET ?url=https://www.imdb.com/title/tt…/technical/`,
-    with `Authorization: Bearer <IMDB_FETCHER_TOKEN>` when a token is set, answering
-    with the page source
+Pick a film and the app asks Gemini, in words, for the page:
 
-`IMDB_FETCHER_MODE` (`auto` by default) forces `query`, `browserless` or `flaresolverr`
-when the endpoint name guesses wrong — a proxy of your own that happens to live at
-`/content`, say. A JSON response is unwrapped from `solution.response` (FlareSolverr's
-shape) or from any of `content`, `html`, `body`, `data`, `result` or `text`, so nothing
-needs a wrapper. A service that reports its own failure at HTTP 200 —
-`{"status": "error", …}` — is repeated to you rather than parsed. A page that turns out
-to be a bot check is asked for again (`IMDB_FETCHER_ATTEMPTS`, 4 by default) and then
-reported as one, because a challenge page and a film with no technical specifications
-are not the same thing.
+> Fetch the technical specifications of *Blade Runner* (1982), IMDb id tt0083658, from
+> IMDb: `https://www.imdb.com/title/tt0083658/technical/`
 
-A pasted page always wins over a fetched one.
+The answer comes back as the same ten rows the page has, and appears under the film
+immediately. It is cached, so a reload or a tweaked preference costs nothing. The
+button needs `GEMINI_API_KEY`; there is nothing else to configure and nothing to run.
 
-If a fetch fails the app says so and carries on with the release year as the only clue
-to the grain, which it labels as a guess.
+**It is a model answering, not IMDb.** So the app never pretends otherwise:
 
-### With FlareSolverr or Byparr
+- The look-up reports its own `confidence` (`high`, `medium`, `low`) and the page
+  prints it, along with whether the rows were searched for or recalled.
+- The prompt tells the model that an empty row is the right answer for a row it does
+  not know, and forbids inventing a camera, laboratory or process to fill one out. An
+  honest blank asks you for a paste; a plausible wrong negative format would quietly
+  misdirect the grain settings, which is the worse failure.
+- The advice page repeats where the rows came from, because grain is the one decision
+  they drive.
 
-IMDb sits behind an AWS WAF that answers a fresh browser with a JavaScript challenge —
-`awswaf.com/challenge.js`, a token, a reload — and escalates to a captcha when the
-fingerprint looks automated. [FlareSolverr](https://github.com/FlareSolverr/FlareSolverr)
-and [Byparr](https://github.com/ThePhaseless/Byparr) speak the same API, and the app
-sends the same request to either:
+`GEMINI_WEB_GROUNDING` (on by default) lets the model search the web for the page
+rather than answer from training data. Google's API does not allow search and a
+response schema on the same request, so a grounded look-up asks for JSON in words and
+is parsed leniently; if the model or the key refuses the tool (HTTP 400), the app
+retries once without it, schema-constrained. Turning grounding off makes that the only
+path.
 
-```bash
-docker run -d -p 8191:8191 ghcr.io/flaresolverr/flaresolverr:latest          # this one
-docker run -d -p 8191:8191 -e BLOCK_MEDIA=true ghcr.io/thephaseless/byparr  # or this one
-```
+### Paste them
 
-```dotenv
-IMDB_FETCHER_URL=http://192.168.1.2:8191/v1
-IMDB_FETCHER_TIMEOUT_SECONDS=90.0
-IMDB_FETCHER_ATTEMPTS=4
-```
+Beside the film is a direct link to its `/technical` page and a box to paste into.
+Open the page, select the specifications, copy, paste — the formatted text as it reads
+on screen parses, tabs, `·` separators, `Runtime: 1 hour 57 minutes` on one line and
+all. So does the page source, whether it carries the current `__NEXT_DATA__` payload,
+the current server-rendered markup, or the pre-2020 table. Page furniture (`Edit`,
+`More to explore`, `Recently viewed`) and prose are discarded.
 
-**Measured against IMDb, FlareSolverr comes back with the page and Byparr does not.**
-Neither service *recognises* an AWS WAF challenge — both look for Cloudflare's
-interstitial specifically — but the challenge answers itself: its script earns a token
-and reloads. What decides it is what happens next. FlareSolverr keeps one browser per
-session name, and the app names a session, so the token one attempt earned is still
-there for the next; the retry then gets the real page. Byparr reads the HTML before the
-reload lands and starts every request from a clean browser, so it returns the challenge
-page as a success however often it is asked. It stays supported — same contract, same
-code path — and works unchanged the day it learns AWS WAF.
+**A paste always wins over a look-up**, and no caveat is attached to one — those rows
+are IMDb's own words.
 
-`IMDB_FETCHER_ATTEMPTS` (4 by default, 1 to 6) is how many times a page that is a bot
-check is asked for again; each attempt is a fresh request, so the worst case is that
-many times the timeout. A cold FlareSolverr session took three attempts to get past
-IMDb here — a challenge answer comes back in about a second, so the retries are cheap
-and the whole fetch took five seconds. When every attempt is met with a challenge the
-app names it rather than reporting a film with no technical specifications.
-
-`maxTimeout` is 90% of `IMDB_FETCHER_TIMEOUT_SECONDS`, so the service gives up and
-explains itself (`408 Timed out while loading the page or solving the challenge`)
-instead of having the connection cut from under it. Give it room: 20 seconds is only
-enough for a page that is not challenged at all. Byparr's `BLOCK_MEDIA=true` drops
-images, fonts and video, which is most of an IMDb page and none of what is parsed.
-Neither service needs a token; `IMDB_FETCHER_TOKEN` is still sent as a bearer header,
-for a reverse proxy in front.
-
-Check it before wiring it up:
-
-```bash
-curl -s http://192.168.1.2:8191/        # FlareSolverr's banner; Byparr answers /health
-for i in 1 2 3; do curl -s -X POST http://192.168.1.2:8191/v1 \
-  -H 'Content-Type: application/json' \
-  -d '{"cmd":"request.get","url":"https://www.imdb.com/title/tt0083658/technical/","session":"probe","maxTimeout":90000}' \
-  | wc -c; done
-```
-
-The first answers are a few kilobytes — that is the challenge page. One coming back
-about a megabyte long is the real thing, which is the retry doing its job.
-
-### With browserless
-
-Browserless serves HTML on `POST` with a JSON body only — there is no `?url=` route on
-it, and none can be configured — so the app builds that request itself. Point it at the
-instance and set the token you started the container with:
-
-```dotenv
-IMDB_FETCHER_URL=http://192.168.1.2:3579/content
-IMDB_FETCHER_TOKEN=your-browserless-token
-IMDB_FETCHER_TIMEOUT_SECONDS=45.0
-```
-
-The token travels as `?token=` (browserless v1 reads only that) and as
-`Authorization: Bearer` (v2 reads either, and a reverse proxy in front may want it).
-Chrome is given 90% of the timeout to reach `domcontentloaded`, so a slow page comes
-back as a browserless error rather than a severed connection; `__NEXT_DATA__` is in the
-initial HTML, so waiting for network idle would only wait for IMDb's ad trackers.
-
-Check the instance is reachable before wiring it up:
-
-```bash
-curl -s "http://192.168.1.2:3579/json/version"                      # is anything listening
-curl -sD - -o /dev/null -X POST "http://192.168.1.2:3579/content?token=$TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{"url":"https://www.imdb.com/title/tt0083658/technical/"}'    # does IMDb answer it
-```
-
-Browserless announces itself as `HeadlessChrome`, which IMDb's WAF blocks on sight, so
-the request overrides the browser's User-Agent and `Accept-Language` and asks for a
-best-attempt page. Even so, plain `/content` usually comes back as the WAF's challenge
-page: the specs then read as empty and the app says it found nothing recognisable.
-`/unblock` (browserless's stealth endpoint) does better, but it is not in the
-open-source image — `POST /unblock` answers 404 there, and nothing carries a solved
-token from one request to the next. For IMDb specifically, use FlareSolverr above;
-browserless remains useful for any page that is not challenged.
+With neither, the release year is the only clue to the grain, and the app labels it as
+a guess.
 
 ## Gemini (optional)
 
@@ -267,12 +189,8 @@ starts with an empty config, the home page reports which integrations are active
 | `GEMINI_TIMEOUT_SECONDS`       | `45.0`                           | Per-request timeout                                            |
 | `GEMINI_MAX_OUTPUT_TOKENS`     | `2048`                           | Response cap                                                   |
 | `GEMINI_TEMPERATURE`           | `0.2`                            | Low on purpose: this is a settings decision                    |
-| `IMDB_FETCHER_URL`             | —                                | Optional `/technical` fetcher; pasting works without one       |
-| `IMDB_FETCHER_MODE`            | `auto`                           | `query`, `browserless` or `flaresolverr` when auto guesses wrong |
-| `IMDB_FETCHER_TOKEN`           | —                                | Bearer header, plus `?token=` in browserless mode              |
-| `IMDB_FETCHER_TIMEOUT_SECONDS` | `20.0`                           | Per-request timeout; 45 suits browserless, 90 FlareSolverr      |
-| `IMDB_FETCHER_ATTEMPTS`        | `4`                              | Retries when the fetcher is served a bot check (1–6)           |
-| `CACHE_TTL_SECONDS`            | `3600`                           | In-process TTL for TMDB, IMDb and Gemini results; `0` disables |
+| `GEMINI_WEB_GROUNDING`         | `true`                           | Let the specs look-up search the web instead of recalling      |
+| `CACHE_TTL_SECONDS`            | `3600`                           | In-process TTL for TMDB and Gemini results; `0` disables       |
 | `HOST` / `PORT`                | `0.0.0.0` / `8080`               | Listen address                                                 |
 | `USER_AGENT`                   | `graindamage/0.7 …`              | Sent on every outbound request                                 |
 | `DEBUG`                        | `false`                          | Verbose errors                                                 |
@@ -289,14 +207,15 @@ log. `.env` is gitignored, and CI scans the history for leaked secrets.
 | `/healthz`   | GET    | `{"status": "ok", "version": …, "capabilities": {…}}`            |
 | `/search`    | POST   | Search results partial                                           |
 | `/pick`      | POST   | The film, its IMDb specs, and the source form                    |
-| `/technical` | POST   | Fetched IMDb specs partial (fetcher only)                        |
+| `/technical` | POST   | The IMDb specs partial, from a Gemini look-up                    |
 | `/advise`    | POST   | Both plans, with commands                                        |
 | `/preset`    | POST   | HandBrake `.json` preset as a download                           |
 | `/api/docs`  | GET    | OpenAPI docs                                                     |
 
 Every error path answers **HTTP 200** with an explanation partial, because HTMX does
-not swap a non-2xx response into the page. A dead TMDB, a refused fetcher, an
-unparseable paste and a silent Gemini each cost a warning, never the settings.
+not swap a non-2xx response into the page. A dead TMDB, a look-up that knows
+nothing, an unparseable paste and a silent Gemini each cost a warning, never the
+settings.
 
 ## Run with Docker
 
@@ -406,7 +325,7 @@ app/
     encoders.py         HandBrake and FFmpeg commands, HandBrake presets
   providers/
     tmdb.py             title search and metadata
-    imdb.py             /technical parsing, paste or fetcher
+    imdb.py             /technical parsing: paste or look-up
     gemini.py           structured advice, merged over the baseline
   sources/
     ffprobe.py mkvinfo.py mediainfo.py    the three source parsers
@@ -423,8 +342,9 @@ Dockerfile compose.yaml .env.example
 
 - **TMDB** is used for search because IMDb has no public API. Each hit resolves its
   `imdb_id`, so IMDb links and the `/technical` page URL still work.
-- **IMDb technical specifications** are never scraped: paste the page source, or point
-  `IMDB_FETCHER_URL` at a fetcher you control.
+- **IMDb technical specifications** are never scraped. Gemini is asked for them and
+  says how sure it is, or you paste them from the `/technical` page yourself; a paste
+  always wins.
 - **Your source file** matters more than the film's release specs for CRF and bitrate,
   which is why all three source formats are parsed and every field can be overridden.
 

@@ -5,8 +5,8 @@ tests exist to pin one of them down:
 
 * **A failure is rendered, not raised.** Every error path has to answer HTTP 200
   with an explanation, because HTMX does not swap a non-2xx response into the page.
-* **Nothing blocks the answer.** A dead TMDB, a refused fetcher, an unparseable
-  paste and a silent Gemini each cost a warning, never the settings.
+* **Nothing blocks the answer.** A dead TMDB, a specs look-up that knows nothing,
+  an unparseable paste and a silent Gemini each cost a warning, never the settings.
 
 Providers reach a mock transport, so no test here needs the network — and
 :func:`make_settings` keeps a developer's real ``.env`` out of the app under test.
@@ -24,9 +24,17 @@ from fastapi.testclient import TestClient
 from app import __version__
 from tests.support import fixture, json_response, make_app, make_settings, mock_client
 
-FETCHER_URL = "https://fetcher.example/get"
 FFPROBE_REPORT = fixture("ffprobe_uhd_hdr.json")
 TECHNICAL_PAGE = fixture("imdb_technical_next_data.html")
+
+# What a technical-specs look-up answers with.
+SPECS_ANSWER: dict[str, Any] = {
+    "negative_formats": ["35 mm"],
+    "cinematographic_processes": ["Super 35"],
+    "aspect_ratios": ["2.20 : 1"],
+    "sound_mixes": ["Dolby Stereo"],
+    "confidence": "medium",
+}
 
 SEARCH_PAYLOAD: dict[str, Any] = {
     "results": [
@@ -79,45 +87,51 @@ def tmdb_transport(
     )
 
 
-def imdb_transport(
-    response: httpx2.Response | None = None,
-) -> tuple[httpx2.AsyncClient, list[httpx2.Request]]:
-    return transport(
-        response if response is not None else httpx2.Response(200, text=TECHNICAL_PAGE)
+def gemini_envelope(payload: Any) -> httpx2.Response:
+    return httpx2.Response(
+        200,
+        json={
+            "candidates": [
+                {
+                    "content": {"role": "model", "parts": [{"text": json.dumps(payload)}]},
+                    "finishReason": "STOP",
+                }
+            ]
+        },
     )
 
 
 def gemini_transport(
     answer: Any = None,
     *,
+    specs: Any = None,
     response: httpx2.Response | None = None,
 ) -> tuple[httpx2.AsyncClient, list[httpx2.Request]]:
-    """A transport answering with Gemini's envelope around ``answer``."""
-    if response is None:
-        payload = {"summary": "Reviewed for this film."} if answer is None else answer
-        response = httpx2.Response(
-            200,
-            json={
-                "candidates": [
-                    {
-                        "content": {"role": "model", "parts": [{"text": json.dumps(payload)}]},
-                        "finishReason": "STOP",
-                    }
-                ]
-            },
-        )
-    return transport(response)
+    """A transport answering Gemini's two calls: the specs look-up and the review.
+
+    They go to the same endpoint, so they are told apart by the question asked.
+    """
+    seen: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        if response is not None:
+            return response
+        if b"Fetch the technical specifications" in request.content:
+            return gemini_envelope(SPECS_ANSWER if specs is None else specs)
+        return gemini_envelope({"summary": "Reviewed for this film."} if answer is None else answer)
+
+    return mock_client(handler), seen
 
 
 def client_for(
     *,
     tmdb: httpx2.AsyncClient | None = None,
-    imdb: httpx2.AsyncClient | None = None,
     gemini: httpx2.AsyncClient | None = None,
     **overrides: Any,
 ) -> TestClient:
     settings = make_settings(**overrides)
-    return TestClient(make_app(settings, tmdb=tmdb, imdb=imdb, gemini=gemini))
+    return TestClient(make_app(settings, tmdb=tmdb, gemini=gemini))
 
 
 @pytest.fixture
@@ -139,27 +153,20 @@ def test_healthz_reports_version_and_capabilities(client: TestClient) -> None:
     assert body["capabilities"] == {
         "tmdb_search": False,
         "gemini_advice": False,
-        "imdb_technical_fetcher": False,
+        "imdb_technical_lookup": False,
         # The rules engine has no configuration, so an unkeyed container is still useful.
         "baseline_rules": True,
     }
 
 
 def test_capabilities_follow_configuration() -> None:
-    body = (
-        client_for(
-            tmdb_api_key="tmdb-key",
-            gemini_api_key="gemini-key",
-            imdb_fetcher_url=FETCHER_URL,
-        )
-        .get("/healthz")
-        .json()
-    )
+    body = client_for(tmdb_api_key="tmdb-key", gemini_api_key="gemini-key").get("/healthz").json()
 
+    # The look-up rides on the Gemini key: there is nothing else to configure.
     assert body["capabilities"] == {
         "tmdb_search": True,
         "gemini_advice": True,
-        "imdb_technical_fetcher": True,
+        "imdb_technical_lookup": True,
         "baseline_rules": True,
     }
 
@@ -275,43 +282,63 @@ def test_the_gemini_checkbox_appears_only_when_a_key_is_set(configured: bool) ->
 
 
 @pytest.mark.parametrize("configured", [True, False])
-def test_the_fetch_button_appears_only_with_a_fetcher(configured: bool) -> None:
+def test_the_lookup_button_appears_only_with_a_gemini_key(configured: bool) -> None:
     tmdb, _ = tmdb_transport()
-    imdb, _ = imdb_transport()
+    gemini, _ = gemini_transport()
     client = client_for(
         tmdb=tmdb,
-        imdb=imdb,
+        gemini=gemini,
         tmdb_api_key="key",
-        imdb_fetcher_url=FETCHER_URL if configured else None,
+        gemini_api_key="key" if configured else None,
     )
 
     text = client.post("/pick", data={"tmdb_id": "78"}).text
 
-    assert ("Fetch from IMDb" in text) is configured
+    assert ("Look these up with Gemini" in text) is configured
+    # The paste box and the link to the page are there either way.
+    assert "Paste the technical specifications from IMDb" in text
+    assert "https://www.imdb.com/title/tt0083658/technical/" in text
 
 
-def test_picking_a_film_shows_the_rows_the_fetcher_returned() -> None:
+def test_picking_a_film_shows_the_rows_the_lookup_returned() -> None:
     tmdb, _ = tmdb_transport()
-    imdb, seen = imdb_transport()
-    client = client_for(tmdb=tmdb, imdb=imdb, tmdb_api_key="key", imdb_fetcher_url=FETCHER_URL)
+    gemini, seen = gemini_transport()
+    client = client_for(tmdb=tmdb, gemini=gemini, tmdb_api_key="key", gemini_api_key="key")
 
     text = client.post("/pick", data={"tmdb_id": "78"}).text
 
     assert "Negative format" in text
     assert "35 mm" in text
     assert len(seen) == 1
+    # Rows that were recalled rather than read must say so on the page.
+    assert "not read from IMDb" in text
+    assert "confidence medium" in text
 
 
-def test_a_refused_fetcher_does_not_cost_the_form() -> None:
+def test_the_lookup_is_asked_about_the_film_the_user_picked() -> None:
     tmdb, _ = tmdb_transport()
-    imdb, _ = imdb_transport(httpx2.Response(502, text="Bad Gateway"))
-    client = client_for(tmdb=tmdb, imdb=imdb, tmdb_api_key="key", imdb_fetcher_url=FETCHER_URL)
+    gemini, seen = gemini_transport()
+    client = client_for(tmdb=tmdb, gemini=gemini, tmdb_api_key="key", gemini_api_key="key")
+
+    client.post("/pick", data={"tmdb_id": "78"})
+
+    asked = seen[0].content
+    assert b"Blade Runner (1982)" in asked
+    assert b"tt0083658" in asked
+    # No key in the query string; it travels as a header.
+    assert "key" not in seen[0].url.params
+
+
+def test_a_failed_lookup_does_not_cost_the_form() -> None:
+    tmdb, _ = tmdb_transport()
+    gemini, _ = gemini_transport(response=httpx2.Response(502, text="Bad Gateway"))
+    client = client_for(tmdb=tmdb, gemini=gemini, tmdb_api_key="key", gemini_api_key="key")
 
     response = client.post("/pick", data={"tmdb_id": "78"})
 
     assert response.status_code == 200
-    assert "The IMDb fetcher returned HTTP 502." in response.text
-    # The paste box is the documented path, so the form must survive the failure.
+    assert "Gemini returned HTTP 502." in response.text
+    # The paste box is the path that always works, so the form must survive.
     assert "Get settings" in response.text
 
 
@@ -328,9 +355,9 @@ def test_a_tmdb_failure_while_picking_is_reported() -> None:
 
 
 @pytest.mark.parametrize("imdb_id", ["", "nope", "tt123", "0083658", "tt0083658/technical"])
-def test_only_a_real_title_id_reaches_the_fetcher(imdb_id: str) -> None:
-    imdb, seen = imdb_transport()
-    client = client_for(imdb=imdb, imdb_fetcher_url=FETCHER_URL)
+def test_only_a_real_title_id_is_looked_up(imdb_id: str) -> None:
+    gemini, seen = gemini_transport()
+    client = client_for(gemini=gemini, gemini_api_key="key")
 
     response = client.post("/technical", data={"imdb_id": imdb_id})
 
@@ -339,26 +366,40 @@ def test_only_a_real_title_id_reaches_the_fetcher(imdb_id: str) -> None:
     assert seen == []
 
 
-def test_without_a_fetcher_the_panel_points_at_the_paste_box(client: TestClient) -> None:
+def test_without_a_key_the_panel_points_at_the_paste_box(client: TestClient) -> None:
     response = client.post("/technical", data={"imdb_id": "tt0083658"})
 
     assert response.status_code == 200
-    assert "Paste the /technical page source instead" in response.text
-    assert "view source" in response.text
+    assert "needs a Gemini key" in response.text
+    assert "paste" in response.text
 
 
-def test_the_fetched_rows_are_rendered() -> None:
-    imdb, _ = imdb_transport()
+def test_the_looked_up_rows_are_rendered() -> None:
+    gemini, _ = gemini_transport()
 
     text = (
-        client_for(imdb=imdb, imdb_fetcher_url=FETCHER_URL)
+        client_for(gemini=gemini, gemini_api_key="key")
         .post("/technical", data={"imdb_id": "tt0083658"})
         .text
     )
 
     assert "Negative format" in text
-    assert "Panavision (anamorphic)" in text
+    assert "35 mm" in text
     assert "Sound mix" in text
+    assert "Dolby Stereo" in text
+
+
+def test_a_lookup_that_knows_nothing_asks_for_a_paste() -> None:
+    gemini, _ = gemini_transport(specs={"confidence": "low"})
+
+    text = (
+        client_for(gemini=gemini, gemini_api_key="key")
+        .post("/technical", data={"imdb_id": "tt0083658"})
+        .text
+    )
+
+    assert "did not have the technical rows" in text
+    assert "paste the specifications" in text
 
 
 # --- step 3: the advice ------------------------------------------------------
@@ -409,23 +450,35 @@ def test_a_pasted_page_with_nothing_in_it_is_reported(client: TestClient) -> Non
         "/advise", data={"technical_source": "<html><body>Not IMDb at all</body></html>"}
     )
 
-    assert "Nothing recognisable was found in the pasted IMDb page" in response.text
+    assert "Nothing recognisable was found in the pasted specifications" in response.text
     assert "libsvtav1" in response.text
 
 
-def test_a_pasted_page_beats_the_fetcher() -> None:
-    imdb, seen = imdb_transport()
-    client = client_for(imdb=imdb, imdb_fetcher_url=FETCHER_URL)
+def test_pasted_specifications_beat_the_lookup() -> None:
+    gemini, seen = gemini_transport()
+    client = client_for(gemini=gemini, gemini_api_key="key")
 
     response = client.post(
         "/advise", data={"imdb_id": "tt0083658", "technical_source": TECHNICAL_PAGE}
     )
 
-    # What the user pasted is what they meant; fetching over it would be worse and slower.
+    # What the user pasted is what they meant; asking a model over it would be worse.
     assert seen == []
     # And it was the pasted rows that decided the grain, not the release year.
     assert "Super 35 mm" in response.text
     assert "Nothing recognisable" not in response.text
+    assert "looked up by Gemini" not in response.text
+
+
+def test_the_answer_says_when_its_rows_were_looked_up() -> None:
+    gemini, _ = gemini_transport()
+    client = client_for(gemini=gemini, gemini_api_key="key")
+
+    response = client.post("/advise", data={"imdb_id": "tt0083658"})
+
+    assert "looked up by Gemini, not read from IMDb" in response.text
+    # The rows still did their job: Super 35 is a 35 mm negative, so grain is expected.
+    assert "libsvtav1" in response.text
 
 
 def test_a_grain_override_is_labelled_as_the_users_own(client: TestClient) -> None:
@@ -450,13 +503,14 @@ def test_a_dead_tmdb_does_not_block_the_answer() -> None:
     assert "output.av1.mkv" in response.text
 
 
-def test_a_refused_fetcher_does_not_block_the_answer() -> None:
-    imdb, _ = imdb_transport(httpx2.Response(502, text="Bad Gateway"))
-    client = client_for(imdb=imdb, imdb_fetcher_url=FETCHER_URL)
+def test_a_failed_lookup_does_not_block_the_answer() -> None:
+    gemini, _ = gemini_transport(response=httpx2.Response(502, text="Bad Gateway"))
+    client = client_for(gemini=gemini, gemini_api_key="key")
 
     response = client.post("/advise", data={"imdb_id": "tt0083658"})
 
-    assert "Paste the IMDb /technical page source for grain-accurate advice." in response.text
+    assert "Paste the film" in response.text
+    assert "for grain-accurate advice." in response.text
     assert "libsvtav1" in response.text
 
 

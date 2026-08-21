@@ -2,15 +2,15 @@
 
 The whole flow is stateless: step 2's form carries the film's ids as hidden fields and
 the pasted text in its textareas, so ``/advise`` can rebuild everything it needs from
-one POST. Re-fetching TMDB or the IMDb technical page is free because both are cached,
-which means a reload or a tweaked preference costs no upstream requests.
+one POST. Re-asking TMDB or re-running the technical-specs lookup is free because both
+are cached, which means a reload or a tweaked preference costs no upstream requests.
 
 Errors are rendered, not raised. Every failure below returns HTTP 200 with an error
 partial, because HTMX does not swap non-2xx responses by default — a 502 here would
 leave the user looking at an unchanged page and no explanation. The exception is
 ``/healthz``, which is machine-facing.
 
-Nothing in a route ever blocks the answer: a dead TMDB, a refused fetcher or an
+Nothing in a route ever blocks the answer: a dead TMDB, a failed specs lookup or an
 unparseable paste each degrade to advice built from whatever survived, with a warning
 saying what was lost.
 """
@@ -38,20 +38,28 @@ from app.models import (
     Movie,
     SizePreference,
     SourceTool,
+    SpecsSource,
     SpeedPreference,
     TechnicalSpecs,
 )
 from app.providers import ProviderDisabled, ProviderError
 from app.providers.gemini import GeminiClient
-from app.providers.imdb import ImdbTechnicalProvider, parse_technical
+from app.providers.imdb import parse_technical
 from app.providers.tmdb import TmdbClient
 from app.sources import MAX_INPUT_CHARS, UnknownSourceFormat, parse_source
 
-# An IMDb /technical page is well over a megabyte once the JSON island is included,
-# so this has to be generous — but not unbounded.
+# The paste box takes either the formatted specifications or the whole page source,
+# and a source paste is well over a megabyte once the JSON island is included.
 MAX_TECHNICAL_CHARS = 4_000_000
 MAX_PATH_CHARS = 240
 MAX_QUERY_CHARS = 200
+
+# A lookup that honestly does not know beats one that invents rows, but the user
+# still has to be told what to do next.
+NO_ROWS_FOUND = (
+    "Gemini did not have the technical rows for this title. Open the technical page "
+    "linked above and paste the specifications to get grain-accurate advice."
+)
 
 _UNSAFE_FILENAME = re.compile(r"[^A-Za-z0-9._-]+")
 _SLUG_STRIP = re.compile(r"[^a-z0-9]+")
@@ -65,7 +73,6 @@ class Services:
     settings: Settings
     templates: Jinja2Templates
     tmdb: TmdbClient
-    imdb: ImdbTechnicalProvider
     gemini: GeminiClient
 
 
@@ -159,8 +166,8 @@ class AdviceInputs:
     def hidden_fields(self) -> dict[str, str]:
         """The subset a plain (non-HTMX) form needs to re-post for the preset download.
 
-        The pasted page source is deliberately excluded: it is up to a megabyte, and
-        the technical rows it produces are already cached against the IMDb id.
+        The pasted specifications are deliberately excluded: a source paste is up to a
+        megabyte, and the rows it produces are already cached against the IMDb id.
 
         ``use_gemini`` is carried through so the downloaded preset matches the numbers
         on screen — the model's answer is cached against the same context, so this
@@ -211,27 +218,51 @@ async def _resolve_movie(
         return None, f"{exc.message} The film's details are missing from this answer."
 
 
+async def _lookup_specs(
+    services: Services, imdb_id: str, *, title: str | None = None, year: int | None = None
+) -> tuple[TechnicalSpecs, str | None, str | None]:
+    """Ask Gemini for a film's technical rows: the rows, a caveat, an error.
+
+    Exactly one of the caveat and the error is ever set. The caveat is not a failure —
+    it says where the rows came from, which the user needs in order to trust them.
+    """
+    try:
+        lookup = await services.gemini.technical_specs(imdb_id, title=title, year=year)
+    except ProviderError as exc:
+        return TechnicalSpecs(), None, exc.message
+    if lookup.specs.is_empty:
+        return lookup.specs, NO_ROWS_FOUND, None
+    return lookup.specs, lookup.caveat, None
+
+
 async def _resolve_specs(
     services: Services, inputs: AdviceInputs, imdb_id: str | None
-) -> tuple[TechnicalSpecs, str | None]:
-    """Pasted page source wins; otherwise try the operator's fetcher."""
+) -> tuple[TechnicalSpecs, SpecsSource | None, str | None]:
+    """Pasted specifications win; otherwise ask Gemini for them."""
     if inputs.technical_source.strip():
         specs = parse_technical(inputs.technical_source)
         if specs.is_empty:
-            return specs, (
-                "Nothing recognisable was found in the pasted IMDb page — no negative "
-                "format, no aspect ratio. Grain had to be guessed from the release year."
+            return (
+                specs,
+                None,
+                (
+                    "Nothing recognisable was found in the pasted specifications — no "
+                    "negative format, no aspect ratio. Grain had to be guessed from the "
+                    "release year."
+                ),
             )
-        return specs, None
+        return specs, SpecsSource.PASTED, None
 
-    if imdb_id and services.imdb.enabled:
-        try:
-            return await services.imdb.fetch_specs(imdb_id), None
-        except ProviderError as exc:
-            return TechnicalSpecs(), (
-                f"{exc.message} Paste the IMDb /technical page source for grain-accurate advice."
+    if imdb_id and services.gemini.enabled:
+        specs, _, failure = await _lookup_specs(services, imdb_id)
+        if failure is not None:
+            return (
+                TechnicalSpecs(),
+                None,
+                (f"{failure} Paste the film's technical specifications for grain-accurate advice."),
             )
-    return TechnicalSpecs(), None
+        return specs, SpecsSource.GEMINI if not specs.is_empty else None, None
+    return TechnicalSpecs(), None, None
 
 
 async def _assemble(services: Services, inputs: AdviceInputs) -> Assembled:
@@ -242,13 +273,14 @@ async def _assemble(services: Services, inputs: AdviceInputs) -> Assembled:
         warnings.append(movie_warning)
 
     imdb_id = inputs.imdb_id or (movie.imdb_id if movie else None)
-    specs, specs_warning = await _resolve_specs(services, inputs, imdb_id)
+    specs, specs_source, specs_warning = await _resolve_specs(services, inputs, imdb_id)
     if specs_warning:
         warnings.append(specs_warning)
 
     request = EncodeRequest(
         movie=movie,
         specs=specs,
+        specs_source=specs_source,
         grain_override=inputs.grain_override,
         bit_depth_override=inputs.bit_depth_override,
         speed=inputs.speed,
@@ -295,6 +327,12 @@ async def _advise(services: Services, inputs: AdviceInputs) -> tuple[Advice, Ass
 
     if inputs.use_gemini and services.gemini.enabled:
         advice = await services.gemini.annotate(assembled.request, advice)
+
+    if assembled.request.specs_source is SpecsSource.GEMINI:
+        advice.notes.append(
+            "The technical rows behind the grain estimate were looked up by Gemini, not "
+            "read from IMDb. Check them on the technical page if the grain matters."
+        )
 
     # Parse warnings first: they explain why the rules had to assume things.
     advice.warnings = [*assembled.warnings, *advice.warnings]
@@ -380,12 +418,12 @@ def create_router(services: Services) -> APIRouter:
             return error(request, exc.message, detail=exc.detail)
 
         specs = TechnicalSpecs()
+        specs_caveat: str | None = None
         specs_error: str | None = None
-        if movie.imdb_id and services.imdb.enabled:
-            try:
-                specs = await services.imdb.fetch_specs(movie.imdb_id)
-            except ProviderError as exc:
-                specs_error = exc.message
+        if movie.imdb_id and services.gemini.enabled:
+            specs, specs_caveat, specs_error = await _lookup_specs(
+                services, movie.imdb_id, title=movie.title, year=movie.year
+            )
 
         return render(
             request,
@@ -393,6 +431,7 @@ def create_router(services: Services) -> APIRouter:
             {
                 "movie": movie,
                 "specs": specs,
+                "specs_caveat": specs_caveat,
                 "specs_error": specs_error,
                 "capabilities": settings.capabilities(),
                 "grain_levels": list(GrainLevel),
@@ -408,6 +447,7 @@ def create_router(services: Services) -> APIRouter:
     async def technical(
         request: Request,
         imdb_id: Annotated[str, Form()] = "",
+        tmdb_id: Annotated[str, Form()] = "",
     ) -> HTMLResponse:
         title_id = _one_line(imdb_id, 40)
         if not re.fullmatch(r"tt\d{5,}", title_id):
@@ -416,22 +456,38 @@ def create_router(services: Services) -> APIRouter:
                 "That is not an IMDb title id.",
                 help_text="Ids look like tt0083658 and are in the film's IMDb URL.",
             )
-        try:
-            specs = await services.imdb.fetch_specs(title_id)
-        except ProviderError as exc:
+
+        # The title and year make the lookup answer for the right film when the model
+        # knows it by name. They are a bonus: the id alone is enough to ask with.
+        title: str | None = None
+        year: int | None = None
+        if (numeric := _one_line(tmdb_id, 20)).isdigit():
+            try:
+                film = await services.tmdb.get_movie(int(numeric))
+            except ProviderError:
+                pass
+            else:
+                title, year = film.title, film.year
+
+        specs, caveat, failure = await _lookup_specs(services, title_id, title=title, year=year)
+        if failure is not None:
             return error(
                 request,
-                exc.message,
-                detail=exc.detail,
+                failure,
                 help_text=(
-                    "Open the film's /technical page, view source, and paste it into the "
-                    "box below instead."
+                    "Open the film's technical page, select the specifications, and paste "
+                    "them into the box below instead."
                 ),
             )
         return render(
             request,
             "partials/technical.html",
-            {"specs": specs, "imdb_id": title_id, "specs_error": None},
+            {
+                "specs": specs,
+                "imdb_id": title_id,
+                "specs_caveat": caveat,
+                "specs_error": None,
+            },
         )
 
     @router.post("/advise", response_class=HTMLResponse)

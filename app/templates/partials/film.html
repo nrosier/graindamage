@@ -66,33 +66,44 @@
   </div>
 
   <p class="row">
-    {% if capabilities.imdb_technical_fetcher and movie.imdb_id %}
+    {% if capabilities.imdb_technical_lookup and movie.imdb_id %}
       <button
         type="button"
         class="secondary"
         hx-post="/technical"
-        hx-params="imdb_id"
+        hx-params="imdb_id,tmdb_id"
         hx-target="#technical-panel"
         hx-swap="innerHTML"
+        hx-indicator="#technical-spinner"
+        hx-disabled-elt="this"
       >
-        Fetch from IMDb
+        Look these up with Gemini
       </button>
+      <span id="technical-spinner" class="spinner" aria-hidden="true">asking Gemini…</span>
     {% endif %}
   </p>
 
   <details class="paste">
-    <summary>Paste the IMDb <code>/technical</code> page source</summary>
+    <summary>Paste the technical specifications from IMDb</summary>
     <p class="muted">
-      Open the technical page, view source, select all, paste here. This app never
-      requests IMDb itself. A paste overrides anything fetched above.
+      {% if movie.imdb_technical_url %}
+        <a href="{{ movie.imdb_technical_url }}" target="_blank" rel="noreferrer noopener">
+          Open the technical page</a>, select the specifications and paste them here —
+        the formatted text, as it reads on screen.
+      {% else %}
+        Open the film's IMDb technical page, select the specifications and paste them
+        here — the formatted text, as it reads on screen.
+      {% endif %}
+      The page source works too. This app never requests IMDb itself, and a paste
+      always beats a look-up.
     </p>
-    <label class="sr-only" for="technical_source">IMDb technical page source</label>
+    <label class="sr-only" for="technical_source">IMDb technical specifications</label>
     <textarea
       id="technical_source"
       name="technical_source"
-      rows="4"
+      rows="6"
       spellcheck="false"
-      placeholder="&lt;!DOCTYPE html&gt;…"
+      placeholder="Runtime&#10;2 hours 57 minutes&#10;Sound mix&#10;Dolby Digital&#10;Aspect ratio&#10;2.39 : 1&#10;Negative format&#10;35 mm…"
     ></textarea>
   </details>
 

@@ -1,8 +1,9 @@
 """A small async TTL cache — enough for one container, deliberately not more.
 
-TMDB rate-limits, the IMDb fetcher is slow, and Gemini costs money, so repeated
-identical requests should not reach any of them. There is no Redis here: a single
-process serves the whole app, so a dict with an eviction pass is the right size.
+TMDB rate-limits and Gemini costs money — and the technical-specs look-up is a
+Gemini call too — so repeated identical requests should not reach either of them.
+There is no Redis here: a single process serves the whole app, so a dict with an
+eviction pass is the right size.
 
 Concurrent misses on the same key are coalesced behind a per-key lock, so ten
 simultaneous searches for the same title make one upstream call, not ten.

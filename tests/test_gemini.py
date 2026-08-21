@@ -3,6 +3,10 @@
 Three separable things are tested here: what the model is *told* (``build_context``),
 what happens to what it *says* (``merge_advice``), and what happens when the call
 itself goes wrong (``GeminiClient.annotate``, which must never raise).
+
+The technical-specs look-up is the one call whose failure the user does see, because
+without rows there is nothing to show in the panel — so it raises rather than pretends,
+and everything it does return is labelled with where it came from.
 """
 
 from __future__ import annotations
@@ -15,12 +19,23 @@ import pytest
 
 from app.advice.rules import build_advice
 from app.advice.validate import MAX_CRF_DRIFT
-from app.models import Advice, AdviceSource, Encoder, EncodeRequest, SourceTool, TechnicalSpecs
+from app.models import (
+    Advice,
+    AdviceSource,
+    Encoder,
+    EncodeRequest,
+    SourceTool,
+    SpecsSource,
+    TechnicalSpecs,
+)
+from app.providers import ProviderDisabled, ProviderUnavailable
 from app.providers.gemini import (
     MAX_NOTES,
     MAX_OVERVIEW_CHARS,
     RESPONSE_SCHEMA,
     SYSTEM_PROMPT,
+    TECHNICAL_PROMPT,
+    TECHNICAL_SCHEMA,
     GeminiClient,
     build_context,
     merge_advice,
@@ -719,3 +734,204 @@ def test_thinking_parts_are_skipped_and_text_parts_joined() -> None:
 
     assert reviewed.source is AdviceSource.GEMINI
     assert reviewed.plans[0].crf == 28.0
+
+
+# --- the technical-specs look-up ---------------------------------------------
+
+SPECS_ANSWER: dict[str, Any] = {
+    "negative_formats": ["35 mm"],
+    "cinematographic_processes": ["Super 35"],
+    "aspect_ratios": ["2.20 : 1"],
+    "sound_mixes": ["Dolby Stereo", "70 mm 6-Track"],
+    "confidence": "high",
+}
+
+
+def looking_up(answer: Any, **overrides: Any) -> tuple[GeminiClient, list[httpx2.Request]]:
+    handler, seen = recording_handler(httpx2.Response(200, json=envelope(answer)))
+    return gemini(handler, **overrides), seen
+
+
+def test_the_lookup_asks_for_the_page_by_id_and_by_name() -> None:
+    client, seen = looking_up(SPECS_ANSWER)
+
+    run(client.technical_specs("tt0083658", title="Blade Runner", year=1982))
+
+    asked = json.loads(seen[0].content)["contents"][0]["parts"][0]["text"]
+    assert "tt0083658" in asked
+    assert "Blade Runner (1982)" in asked
+    # The URL is in the question so a grounded model can go and read the real page.
+    assert "https://www.imdb.com/title/tt0083658/technical/" in asked
+
+
+def test_the_rows_come_back_as_specs() -> None:
+    client, _ = looking_up(SPECS_ANSWER)
+
+    lookup = run(client.technical_specs("tt0083658"))
+
+    assert lookup.specs.negative_formats == ["35 mm"]
+    assert lookup.specs.sound_mixes == ["Dolby Stereo", "70 mm 6-Track"]
+    assert lookup.confidence == "high"
+    assert "confidence high" in lookup.caveat
+    assert "not read from IMDb" in lookup.caveat
+
+
+def test_a_grounded_lookup_searches_and_is_parsed_leniently() -> None:
+    client, seen = looking_up(f"Here are the rows:\n```json\n{json.dumps(SPECS_ANSWER)}\n```\n")
+
+    lookup = run(client.technical_specs("tt0083658"))
+
+    body = json.loads(seen[0].content)
+    assert body["tools"] == [{"google_search": {}}]
+    # Grounding and structured output cannot be asked for at the same time.
+    assert "responseSchema" not in body["generationConfig"]
+    assert "single JSON object" in body["systemInstruction"]["parts"][0]["text"]
+    assert lookup.grounded
+    assert "searching the web" in lookup.caveat
+    assert lookup.specs.negative_formats == ["35 mm"]
+
+
+def test_without_grounding_the_lookup_is_held_to_the_schema() -> None:
+    client, seen = looking_up(SPECS_ANSWER, gemini_web_grounding=False)
+
+    lookup = run(client.technical_specs("tt0083658"))
+
+    body = json.loads(seen[0].content)
+    assert "tools" not in body
+    assert body["generationConfig"]["responseSchema"] == TECHNICAL_SCHEMA
+    assert body["systemInstruction"]["parts"][0]["text"] == TECHNICAL_PROMPT
+    # A look-up is recall, not judgement: nothing about it wants variation.
+    assert body["generationConfig"]["temperature"] == 0.0
+    assert not lookup.grounded
+    assert "recalled from training data" in lookup.caveat
+
+
+def test_a_model_without_grounding_is_asked_again_without_it() -> None:
+    seen: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        if len(seen) == 1:
+            return httpx2.Response(400, json={"error": {"message": "unsupported tool"}})
+        return httpx2.Response(200, json=envelope(SPECS_ANSWER))
+
+    lookup = run(gemini(handler).technical_specs("tt0083658"))
+
+    assert len(seen) == 2
+    assert "tools" not in json.loads(seen[1].content)
+    assert lookup.specs.negative_formats == ["35 mm"]
+    # The rows are worth less without a search behind them, and say so.
+    assert not lookup.grounded
+
+
+def test_a_refusal_that_is_not_about_grounding_is_only_tried_twice() -> None:
+    handler, seen = recording_handler(httpx2.Response(400, json={"error": {}}))
+
+    with pytest.raises(ProviderUnavailable, match="Gemini rejected the request"):
+        run(gemini(handler).technical_specs("tt0083658"))
+
+    assert len(seen) == 2
+
+
+def test_a_lookup_that_knows_nothing_is_empty_rather_than_invented() -> None:
+    client, _ = looking_up({"confidence": "low"})
+
+    lookup = run(client.technical_specs("tt0083658"))
+
+    assert lookup.specs.is_empty
+    assert lookup.confidence == "low"
+
+
+def test_rows_of_the_wrong_shape_are_dropped_not_trusted() -> None:
+    client, _ = looking_up(
+        {
+            "negative_formats": ["16 mm"],
+            "aspect_ratios": "1.37 : 1",
+            "resolution": ["4K"],
+            "cameras": [None, 12, "Bolex H16"],
+            "confidence": "very sure indeed",
+        }
+    )
+
+    lookup = run(client.technical_specs("tt0083658"))
+
+    assert lookup.specs.negative_formats == ["16 mm"]
+    assert lookup.specs.aspect_ratios == []
+    assert lookup.specs.cameras == ["Bolex H16"]
+    # An unrecognised confidence is the lowest one, never the benefit of the doubt.
+    assert lookup.confidence == "low"
+
+
+def test_the_same_film_is_only_looked_up_once() -> None:
+    client, seen = looking_up(SPECS_ANSWER)
+
+    first = run(client.technical_specs("tt0083658", title="Blade Runner", year=1982))
+    second = run(client.technical_specs("tt0083658", title="Blade Runner", year=1982))
+
+    assert len(seen) == 1
+    assert first.specs == second.specs
+
+
+def test_a_different_film_is_a_different_question() -> None:
+    client, seen = looking_up(SPECS_ANSWER)
+
+    run(client.technical_specs("tt0083658"))
+    run(client.technical_specs("tt12042730"))
+
+    assert len(seen) == 2
+
+
+def test_a_lookup_without_a_key_names_the_paste_box() -> None:
+    client = GeminiClient(make_settings(), client=mock_client(lambda request: httpx2.Response(500)))
+
+    with pytest.raises(ProviderDisabled, match="Paste the technical page instead"):
+        run(client.technical_specs("tt0083658"))
+
+
+def test_a_failed_lookup_raises_rather_than_answering_emptily() -> None:
+    handler, _ = recording_handler(httpx2.Response(500, json={"error": {}}))
+
+    with pytest.raises(ProviderUnavailable, match=r"Gemini returned HTTP 500\."):
+        run(gemini(handler).technical_specs("tt0083658"))
+
+
+def test_the_lookup_schema_avoids_what_gemini_rejects() -> None:
+    def walk(node: object) -> None:
+        if isinstance(node, dict):
+            assert "additionalProperties" not in node
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(TECHNICAL_SCHEMA)
+    assert set(TECHNICAL_SCHEMA["properties"]) == {*TechnicalSpecs.model_fields, "confidence"}
+
+
+def test_the_lookup_prompt_forbids_filling_rows_out() -> None:
+    # The whole risk of this feature is a model inventing a negative format that then
+    # decides how much grain the encode keeps.
+    assert "An empty list is the right answer for a row you do not know" in TECHNICAL_PROMPT
+    assert "verbatim" in TECHNICAL_PROMPT
+    assert "Never invent" in TECHNICAL_PROMPT
+    assert "Do not inflate it" in TECHNICAL_PROMPT
+
+
+def test_the_advice_context_says_where_the_rows_came_from() -> None:
+    advice, request = baseline()
+
+    request.specs_source = SpecsSource.GEMINI
+    recalled = build_context(request, advice)
+    request.specs_source = SpecsSource.PASTED
+    pasted = build_context(request, advice)
+
+    assert "unverified" in recalled["imdb_technical_source"]
+    assert "authoritative" in pasted["imdb_technical_source"]
+
+
+def test_rows_with_no_provenance_claim_none() -> None:
+    advice, request = baseline()
+
+    assert request.specs_source is None
+    assert "imdb_technical_source" not in build_context(request, advice)

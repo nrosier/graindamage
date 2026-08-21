@@ -12,7 +12,6 @@ produces real encoding settings.
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -49,26 +48,15 @@ class Settings(BaseSettings):
     gemini_temperature: float = Field(default=0.2, ge=0.0, le=2.0)
 
     # --- IMDb technical specs ---------------------------------------------
-    # Pasting the /technical page source always works. Optionally, a fetcher you
-    # control (proxy, browserless, cookie-bearing service) can retrieve it instead;
-    # it receives the IMDb URL and returns the page source.
+    # IMDb is behind a WAF that answers automated requests with a JavaScript bot
+    # check, so this app does not fetch the page at all. The rows come from Gemini
+    # (which is asked for the film's /technical rows) or from a paste, and the link
+    # to the real page is always on screen so a paste is one copy away.
     #
-    # Three wire contracts, because none of these services can be configured into
-    # the others' shape:
-    #   query         GET  {url}?url={imdb_url}          — a proxy or Worker you wrote
-    #   browserless   POST {url} {"url": "{imdb_url}"}   — browserless /content, /unblock
-    #   flaresolverr  POST {url} {"cmd": "request.get"}  — Byparr or FlareSolverr /v1
-    # "auto" reads the endpoint name: /v1 is FlareSolverr's, a bare host:port or
-    # /content or /unblock is browserless, anything else is the query contract.
-    imdb_fetcher_url: str | None = None
-    imdb_fetcher_mode: Literal["auto", "query", "browserless", "flaresolverr"] = "auto"
-    imdb_fetcher_token: str | None = None
-    imdb_fetcher_timeout_seconds: float = 20.0
-    # A bot check is answered by the fetcher's browser, not by us, and the token it
-    # earns lands in whatever session that fetcher keeps: asking again then gets the
-    # real page. FlareSolverr keeps one per session name; browserless does not.
-    # Four, because a cold FlareSolverr session needed three to get past IMDb.
-    imdb_fetcher_attempts: int = Field(default=4, ge=1, le=6)
+    # Grounding lets that lookup search the web instead of answering from memory,
+    # which is the difference between IMDb's rows and something that looks like
+    # them. It is dropped automatically if the model turns out not to support it.
+    gemini_web_grounding: bool = True
 
     # --- caching ----------------------------------------------------------
     cache_ttl_seconds: int = Field(default=3600, ge=0)
@@ -81,16 +69,13 @@ class Settings(BaseSettings):
     def gemini_enabled(self) -> bool:
         return bool(self.gemini_api_key)
 
-    @property
-    def imdb_fetcher_enabled(self) -> bool:
-        return bool(self.imdb_fetcher_url)
-
     def capabilities(self) -> dict[str, bool]:
         """Which optional integrations are wired up, for /healthz and the UI."""
         return {
             "tmdb_search": self.tmdb_enabled,
             "gemini_advice": self.gemini_enabled,
-            "imdb_technical_fetcher": self.imdb_fetcher_enabled,
+            # The technical rows are looked up through Gemini, so they ride on its key.
+            "imdb_technical_lookup": self.gemini_enabled,
             "baseline_rules": True,
         }
 

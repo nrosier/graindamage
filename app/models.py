@@ -358,11 +358,23 @@ class SizePreference(StrEnum):
     COMPACT = "compact"
 
 
+class SpecsSource(StrEnum):
+    """Where a set of technical rows came from, because it changes how much they weigh.
+
+    Pasted rows are IMDb's own words. Looked-up rows are a language model's recollection
+    of that page, which is worth having and worth labelling as such.
+    """
+
+    PASTED = "pasted"
+    GEMINI = "gemini"
+
+
 class EncodeRequest(BaseModel):
     """Everything the rules engine needs, assembled from the step-2 form."""
 
     movie: Movie | None = None
     specs: TechnicalSpecs = Field(default_factory=TechnicalSpecs)
+    specs_source: SpecsSource | None = None
     source: SourceMedia = Field(default_factory=SourceMedia)
     source_tool: SourceTool | None = None
     grain_override: GrainLevel | None = None

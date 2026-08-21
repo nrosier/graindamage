@@ -1,6 +1,9 @@
 {#
   The IMDb /technical rows. Rendered inside the step-2 form on first load, and again
-  on its own when the fetch button refreshes #technical-panel.
+  on its own when the look-up button refreshes #technical-panel.
+
+  specs_error is a failure; specs_caveat says where rows that did arrive came from,
+  which is the difference between IMDb's own words and a model's recollection of them.
 #}
 {% if specs_error %}
   <p class="inline-warning">{{ specs_error }}</p>
@@ -8,10 +11,17 @@
 
 {% if specs.is_empty %}
   <p class="muted">
-    No technical rows yet. Without them the grain level is a guess from the release
-    year — fetch or paste the <code>/technical</code> page to fix that.
+    {% if specs_caveat is defined and specs_caveat %}
+      {{ specs_caveat }}
+    {% else %}
+      No technical rows yet. Without them the grain level is a guess from the release
+      year — look them up or paste them from the <code>/technical</code> page to fix that.
+    {% endif %}
   </p>
 {% else %}
+  {% if specs_caveat is defined and specs_caveat %}
+    <p class="muted">{{ specs_caveat }}</p>
+  {% endif %}
   <dl class="specs">
     {% for label, values in [
       ("Negative format", specs.negative_formats),
