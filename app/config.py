@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     debug: bool = False
     host: str = "0.0.0.0"  # the container listens on all interfaces by design
     port: int = 8080
-    user_agent: str = "graindamage/0.7 (+https://github.com/nrosier/graindamage)"
+    user_agent: str = "graindamage/0.8 (+https://github.com/nrosier/graindamage)"
 
     # --- TMDB: title search and metadata ----------------------------------
     tmdb_api_key: str | None = None

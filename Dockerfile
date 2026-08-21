@@ -29,6 +29,13 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PATH="/opt/venv/bin:$PATH"
 
+# ffmpeg carries ffprobe, which the CLI runs on the file it is given. It is the only apt
+# package this image needs and no smaller Debian package carries ffprobe — but it is also
+# most of the image: roughly 260 MB becomes roughly 850 MB.
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN groupadd --system app && useradd --system --gid app --no-create-home app
 
 COPY --from=builder /opt/venv /opt/venv

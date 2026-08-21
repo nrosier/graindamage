@@ -579,7 +579,7 @@ def build_advice(request: EncodeRequest) -> Advice:
     grain = infer_grain(
         request.specs,
         request.source,
-        year=request.movie.year if request.movie else None,
+        year=request.movie.year if request.movie else request.fallback_year,
         override=request.grain_override,
     )
 

@@ -383,6 +383,10 @@ class EncodeRequest(BaseModel):
     size: SizePreference = SizePreference.BALANCED
     input_path: str = "input.mkv"
     output_stem: str = "output"
+    # The release year when no film was picked — the CLI reads it out of the filename,
+    # and it is the last thing the grain heuristic has to go on. Ignored when ``movie``
+    # is set, because a looked-up year beats a parsed one.
+    fallback_year: int | None = None
 
 
 class Adjustment(BaseModel):

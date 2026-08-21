@@ -28,7 +28,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.datastructures import FormData
 
 from app import __version__
-from app.advice import attach_commands, build_advice, render_handbrake_preset
+from app.advice import finish_advice, render_handbrake_preset
 from app.config import Settings
 from app.models import (
     Advice,
@@ -323,20 +323,11 @@ def _default_input_path(request: EncodeRequest) -> str:
 async def _advise(services: Services, inputs: AdviceInputs) -> tuple[Advice, Assembled]:
     """Baseline advice, optionally reviewed by Gemini, with commands attached."""
     assembled = await _assemble(services, inputs)
-    advice = build_advice(assembled.request)
-
-    if inputs.use_gemini and services.gemini.enabled:
-        advice = await services.gemini.annotate(assembled.request, advice)
-
-    if assembled.request.specs_source is SpecsSource.GEMINI:
-        advice.notes.append(
-            "The technical rows behind the grain estimate were looked up by Gemini, not "
-            "read from IMDb. Check them on the technical page if the grain matters."
-        )
-
-    # Parse warnings first: they explain why the rules had to assume things.
-    advice.warnings = [*assembled.warnings, *advice.warnings]
-    attach_commands(advice, assembled.request)
+    advice = await finish_advice(
+        assembled.request,
+        annotator=services.gemini if inputs.use_gemini and services.gemini.enabled else None,
+        warnings=assembled.warnings,
+    )
     return advice, assembled
 
 
