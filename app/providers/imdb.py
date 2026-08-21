@@ -5,9 +5,14 @@ it. Two routes in:
 
 1. **Paste** the page source. Always available, needs no configuration, and is the
    documented path.
-2. **Fetch** through a service the operator controls (``IMDB_FETCHER_URL``) — a proxy,
-   a browserless instance, anything that takes a URL and returns page source. Two wire
-   contracts are spoken; see :func:`_plan_request`.
+2. **Fetch** through a service the operator controls (``IMDB_FETCHER_URL``) — Byparr,
+   FlareSolverr, a browserless instance, a proxy, anything that takes a URL and returns
+   page source. Three wire contracts are spoken; see :func:`_plan_request`.
+
+   IMDb answers a fresh browser with a JavaScript bot check, so a fetched page is
+   examined for one and asked for again rather than parsed: answering the check earns
+   the browser a token, and a fetcher that keeps a session serves the real page on a
+   later attempt. ``IMDB_FETCHER_ATTEMPTS`` bounds that.
 
 Parsing tries three layouts in order, because IMDb has shipped all three and a saved
 page could be any of them:
@@ -283,8 +288,12 @@ class ImdbTechnicalProvider:
         """Return the page source for ``tt…``'s technical page.
 
         The request is shaped by :func:`_plan_request`. Either raw HTML or a JSON
-        envelope with a ``content`` / ``html`` / ``body`` / ``data`` key is accepted,
-        which covers browserless, most scraping APIs, and a twenty-line Worker.
+        envelope is accepted — ``solution.response`` for Byparr and FlareSolverr, or a
+        top-level ``content`` / ``html`` / ``body`` / ``data`` / ``result`` / ``text``
+        key — which covers browserless, most scraping APIs, and a twenty-line Worker.
+
+        A page that is a bot check rather than IMDb is asked for again, and reported as
+        such if every attempt is met with one.
         """
         if not self.enabled:
             raise ProviderDisabled(
@@ -293,8 +302,23 @@ class ImdbTechnicalProvider:
         if not re.fullmatch(r"tt\d{5,}", imdb_id):
             raise ProviderUnavailable(f"{imdb_id!r} is not an IMDb title id.")
 
-        target = f"https://www.imdb.com/title/{imdb_id}/technical/"
-        plan = _plan_request(self._settings, target)
+        plan = _plan_request(self._settings, f"https://www.imdb.com/title/{imdb_id}/technical/")
+        attempts = self._settings.imdb_fetcher_attempts
+
+        page = ""
+        for _ in range(attempts):
+            page = await self._fetch_once(plan)
+            if not _looks_like_a_challenge(page):
+                return page
+
+        tries = f"{attempts} attempt" + ("s" if attempts != 1 else "")
+        raise ProviderUnavailable(
+            "The IMDb fetcher was served a bot check instead of the technical page.",
+            detail=f"{tries} met {_challenge_flavour(page)}. Pasting the source always works.",
+        )
+
+    async def _fetch_once(self, plan: _FetchRequest) -> str:
+        """One call to the fetcher, reduced to page source."""
 
         async def send(client: httpx2.AsyncClient) -> httpx2.Response:
             return await client.request(
@@ -318,10 +342,15 @@ class ImdbTechnicalProvider:
             ) from exc
 
         if response.status_code >= 400:
-            raise ProviderUnavailable(f"The IMDb fetcher returned HTTP {response.status_code}.")
+            raise ProviderUnavailable(
+                f"The IMDb fetcher returned HTTP {response.status_code}.",
+                detail=_error_detail(response),
+            )
 
         body = response.text
         if "json" in response.headers.get("content-type", "").casefold():
+            if failure := _envelope_failure(body):
+                raise ProviderUnavailable(f"The IMDb fetcher reported: {failure}")
             body = _unwrap_json_envelope(body) or body
         if not body.strip():
             raise ProviderUnavailable("The IMDb fetcher returned an empty body.")
@@ -338,6 +367,7 @@ class ImdbTechnicalProvider:
 class _FetchRequest:
     """One outbound call to the operator's fetcher, fully shaped."""
 
+    kind: str
     method: str
     url: str
     params: dict[str, str]
@@ -345,10 +375,49 @@ class _FetchRequest:
     payload: dict[str, Any] | None
 
 
-# The endpoint names browserless serves HTML on. A configured URL ending in one of
-# them — or in nothing at all, which is how a host:port gets written down — is a
-# browserless instance rather than a fetcher someone wrote.
+# The endpoint names each service answers on. A configured URL ending in one of these
+# is that service rather than a fetcher someone wrote; "" is a bare host:port, which is
+# how a browserless instance usually gets written down.
 _BROWSERLESS_ENDPOINTS = frozenset({"", "content", "unblock"})
+_FLARESOLVERR_ENDPOINTS = frozenset({"v1"})
+
+# Byparr and FlareSolverr report a failure in the envelope, at HTTP 200. Anything else
+# in ``status`` is a failure worth repeating to the user.
+_ENVELOPE_OK = frozenset({"ok", "success"})
+
+# Browserless announces itself as HeadlessChrome, which is the first thing a WAF looks
+# at, so the browser it drives is given a plausible desktop identity instead. The
+# version ages harmlessly: it only has to be a version that exists.
+_BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
+)
+
+# FlareSolverr keeps one browser per session name and creates it on first use, so the
+# token its browser earns answering IMDb's bot check is still there for the next
+# attempt — which is what makes retrying worthwhile. The TTL stops a name from holding
+# a browser open forever. Byparr has no sessions and ignores both fields.
+_FLARESOLVERR_SESSION = "graindamage-imdb"
+_FLARESOLVERR_SESSION_TTL_MINUTES = 30
+
+# What a bot check standing in for the page looks like. Every marker was checked
+# against a real /technical page, which contains none of them.
+_CHALLENGE_MARKERS = (
+    "awswafcookiedomainlist",
+    "awswafintegration",
+    "gokuprops",
+    "human verification",
+    "cf_chl_opt",
+    "cf-browser-verification",
+    "challenge-platform",
+    "checking your browser",
+    "just a moment",
+)
+_AWS_WAF_MARKERS = ("awswaf", "gokuprops", "human verification")
+
+# The interstitials are a couple of kilobytes; IMDb's own page is a megabyte. Only the
+# head is searched, which is where a challenge keeps everything.
+_CHALLENGE_WINDOW = 20_000
 
 
 def _endpoint_name(url: httpx2.URL) -> str:
@@ -356,20 +425,45 @@ def _endpoint_name(url: httpx2.URL) -> str:
     return url.path.strip("/").rsplit("/", 1)[-1].casefold()
 
 
+def _fetcher_kind(mode: str, endpoint_name: str) -> str:
+    """Which contract to speak: the configured mode, or the endpoint name's own answer."""
+    if mode != "auto":
+        return mode
+    if endpoint_name in _FLARESOLVERR_ENDPOINTS:
+        return "flaresolverr"
+    if endpoint_name in _BROWSERLESS_ENDPOINTS:
+        return "browserless"
+    return "query"
+
+
+def _budget_ms(settings: Settings) -> int:
+    """90% of the HTTP timeout, in milliseconds.
+
+    The browser is given slightly less time than the connection to it, so a slow page
+    comes back as the service's own error rather than as a severed connection.
+    """
+    return max(1000, int(settings.imdb_fetcher_timeout_seconds * 900))
+
+
 def _plan_request(settings: Settings, target: str) -> _FetchRequest:
     """Shape the fetcher call for whichever contract the configured URL speaks.
 
-    ``query`` (the default for a URL with a path of its own)::
+    ``query`` — a proxy or Worker of your own::
 
         GET {IMDB_FETCHER_URL}?url={target}      Authorization: Bearer {token}
 
-    ``browserless`` (a bare ``host:port``, ``/content`` or ``/unblock``)::
+    ``browserless`` — a bare ``host:port``, ``/content`` or ``/unblock``::
 
         POST {IMDB_FETCHER_URL}?token={token}    {"url": "{target}", …}
 
-    Browserless serves HTML on POST-with-a-JSON-body only; there is no ``?url=`` route
-    to configure, so the difference has to live here. ``IMDB_FETCHER_MODE`` forces
-    either contract when the endpoint name guesses wrong.
+    ``flaresolverr`` — Byparr or FlareSolverr, at ``/v1``::
+
+        POST {IMDB_FETCHER_URL}                  {"cmd": "request.get", "url": "{target}"}
+
+    None of the three can be configured into the others' shape — browserless has no
+    ``?url=`` route, FlareSolverr takes a command rather than a URL parameter — so the
+    difference has to live here. ``IMDB_FETCHER_MODE`` forces one when the endpoint
+    name guesses wrong.
     """
     url = httpx2.URL(str(settings.imdb_fetcher_url))
     token = settings.imdb_fetcher_token
@@ -380,13 +474,29 @@ def _plan_request(settings: Settings, target: str) -> _FetchRequest:
     if token:
         headers["Authorization"] = f"Bearer {token}"
 
-    mode = settings.imdb_fetcher_mode
     endpoint_name = _endpoint_name(url)
-    if mode == "query" or (mode == "auto" and endpoint_name not in _BROWSERLESS_ENDPOINTS):
-        return _FetchRequest("GET", str(url), {**params, "url": target}, headers, None)
+    kind = _fetcher_kind(settings.imdb_fetcher_mode, endpoint_name)
 
-    # /content is the endpoint; a bare host:port means the operator wrote down the
-    # instance rather than the route.
+    if kind == "query":
+        return _FetchRequest(kind, "GET", str(url), {**params, "url": target}, headers, None)
+
+    if kind == "flaresolverr":
+        # Byparr implements FlareSolverr's API: one command, and the page comes back in
+        # solution.response. maxTimeout is milliseconds (Byparr reads anything >= 1000
+        # as ms too), and it covers solving the challenge as well as loading the page.
+        # session and session_ttl_minutes are what let a retry benefit from the token
+        # the previous attempt's browser earned; see _FLARESOLVERR_SESSION.
+        command = {
+            "cmd": "request.get",
+            "url": target,
+            "maxTimeout": _budget_ms(settings),
+            "session": _FLARESOLVERR_SESSION,
+            "session_ttl_minutes": _FLARESOLVERR_SESSION_TTL_MINUTES,
+        }
+        return _FetchRequest(kind, "POST", str(url), params, headers, command)
+
+    # Browserless. /content is the endpoint; a bare host:port means the operator wrote
+    # down the instance rather than the route.
     endpoint = str(url) if endpoint_name else str(url.copy_with(path="/content", query=None))
     if token:
         # browserless v1 only reads the query parameter; v2 reads either. The bearer
@@ -396,18 +506,82 @@ def _plan_request(settings: Settings, target: str) -> _FetchRequest:
     if endpoint_name == "unblock":
         # /unblock drives a stealth browser for WAF-protected pages and returns JSON;
         # "content" is what asks for the HTML in it. It takes no gotoOptions.
-        return _FetchRequest("POST", endpoint, params, headers, {"url": target, "content": True})
+        payload: dict[str, Any] = {"url": target, "content": True}
+        return _FetchRequest(kind, "POST", endpoint, params, headers, payload)
 
-    # The parser reads __NEXT_DATA__, which is in the initial HTML, so there is nothing
-    # to gain by waiting for network idle — that only waits for IMDb's ad trackers.
-    # Chrome is given 90% of the HTTP timeout so it reports the failure rather than
-    # having the connection cut from under it.
-    goto_timeout_ms = max(1000, int(settings.imdb_fetcher_timeout_seconds * 900))
-    payload: dict[str, Any] = {
+    payload = {
         "url": target,
-        "gotoOptions": {"waitUntil": "domcontentloaded", "timeout": goto_timeout_ms},
+        # The parser reads __NEXT_DATA__, which is in the initial HTML, so there is
+        # nothing to gain by waiting for network idle — that only waits for the ads.
+        "gotoOptions": {"waitUntil": "domcontentloaded", "timeout": _budget_ms(settings)},
+        "userAgent": {"userAgent": _BROWSER_USER_AGENT},
+        "setExtraHTTPHeaders": {"Accept-Language": "en-US,en;q=0.9"},
+        # Return whatever loaded rather than nothing at all when a wait times out.
+        "bestAttempt": True,
     }
-    return _FetchRequest("POST", endpoint, params, headers, payload)
+    return _FetchRequest(kind, "POST", endpoint, params, headers, payload)
+
+
+def _looks_like_a_challenge(page: str) -> bool:
+    """Whether the fetcher was served a bot check instead of IMDb.
+
+    A page carrying IMDb's own data is never one, whatever else it mentions, so the
+    markers only decide for pages that have no specs in them anyway.
+    """
+    if "__NEXT_DATA__" in page or "title-techspec" in page:
+        return False
+    head = page[:_CHALLENGE_WINDOW].casefold()
+    return any(marker in head for marker in _CHALLENGE_MARKERS)
+
+
+def _challenge_flavour(page: str) -> str:
+    """Whose bot check it was, so the reader knows what stopped them."""
+    head = page[:_CHALLENGE_WINDOW].casefold()
+    if any(marker in head for marker in _AWS_WAF_MARKERS):
+        return "IMDb's AWS WAF JavaScript challenge"
+    return "a JavaScript bot check"
+
+
+def _error_detail(response: httpx2.Response) -> str | None:
+    """The service's own explanation for an HTTP error, if it gave one.
+
+    Byparr answers 408 with ``{"detail": "Timed out while … solving the challenge"}``,
+    which is worth more to the reader than the status code alone.
+    """
+    try:
+        payload: Any = json.loads(response.text)
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    for key in ("detail", "message", "error"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()[:200]
+    return None
+
+
+def _envelope_failure(body: str) -> str | None:
+    """The failure a FlareSolverr-shaped envelope reports at HTTP 200, if any.
+
+    Byparr and FlareSolverr answer ``{"status": "error", "message": …}`` for some
+    failures, which would otherwise reach the parser as an unrecognisable page and be
+    reported as a film with no technical specifications.
+    """
+    try:
+        payload: Any = json.loads(body)
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    status = payload.get("status")
+    if not isinstance(status, str) or status.casefold() in _ENVELOPE_OK:
+        return None
+    for key in ("message", "detail", "error"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()[:200]
+    return status
 
 
 def _unwrap_json_envelope(body: str) -> str | None:
@@ -418,6 +592,12 @@ def _unwrap_json_envelope(body: str) -> str | None:
     if isinstance(payload, str):
         return payload
     if isinstance(payload, dict):
+        # FlareSolverr and Byparr nest the page one level down, in solution.response.
+        solution = payload.get("solution")
+        if isinstance(solution, dict):
+            nested = solution.get("response")
+            if isinstance(nested, str) and nested.strip():
+                return nested
         for key in ("content", "html", "body", "data", "result", "text"):
             value = payload.get(key)
             if isinstance(value, str) and value.strip():

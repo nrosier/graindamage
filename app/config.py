@@ -53,16 +53,22 @@ class Settings(BaseSettings):
     # control (proxy, browserless, cookie-bearing service) can retrieve it instead;
     # it receives the IMDb URL and returns the page source.
     #
-    # Two wire contracts, because browserless has no GET ?url= route and cannot be
-    # configured to grow one:
-    #   query        GET  {url}?url={imdb_url}          — a proxy or Worker you wrote
-    #   browserless  POST {url} {"url": "{imdb_url}"}   — browserless /content, /unblock
-    # "auto" reads the endpoint name: a bare host:port, /content or /unblock is
-    # browserless, anything else is the query contract.
+    # Three wire contracts, because none of these services can be configured into
+    # the others' shape:
+    #   query         GET  {url}?url={imdb_url}          — a proxy or Worker you wrote
+    #   browserless   POST {url} {"url": "{imdb_url}"}   — browserless /content, /unblock
+    #   flaresolverr  POST {url} {"cmd": "request.get"}  — Byparr or FlareSolverr /v1
+    # "auto" reads the endpoint name: /v1 is FlareSolverr's, a bare host:port or
+    # /content or /unblock is browserless, anything else is the query contract.
     imdb_fetcher_url: str | None = None
-    imdb_fetcher_mode: Literal["auto", "query", "browserless"] = "auto"
+    imdb_fetcher_mode: Literal["auto", "query", "browserless", "flaresolverr"] = "auto"
     imdb_fetcher_token: str | None = None
     imdb_fetcher_timeout_seconds: float = 20.0
+    # A bot check is answered by the fetcher's browser, not by us, and the token it
+    # earns lands in whatever session that fetcher keeps: asking again then gets the
+    # real page. FlareSolverr keeps one per session name; browserless does not.
+    # Four, because a cold FlareSolverr session needed three to get past IMDb.
+    imdb_fetcher_attempts: int = Field(default=4, ge=1, le=6)
 
     # --- caching ----------------------------------------------------------
     cache_ttl_seconds: int = Field(default=3600, ge=0)

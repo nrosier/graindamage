@@ -104,10 +104,12 @@ site, so **the app never scrapes it**. Two ways to get the data in:
 - **Paste the page source.** Open `https://www.imdb.com/title/tt0083658/technical`,
   view source, paste. Both the current `__NEXT_DATA__` payload and the older markup are
   parsed. This always works and needs no configuration.
-- **Point `IMDB_FETCHER_URL` at a fetcher you run.** A browserless instance, a proxy, a
-  Worker, or anything cookie-bearing you control. Two wire contracts are spoken, and the
-  endpoint name in the URL picks one:
+- **Point `IMDB_FETCHER_URL` at a fetcher you run.** Byparr, FlareSolverr, a browserless
+  instance, a proxy, or anything cookie-bearing you control. Three wire contracts are
+  spoken, and the endpoint name in the URL picks one:
 
+  - `http://192.168.1.2:8191/v1` → `POST {"cmd": "request.get", "url": "…/technical/",
+    "maxTimeout": …}` — Byparr and FlareSolverr
   - `http://192.168.1.2:3579/content` → `POST {"url": "…/technical/", "gotoOptions": {…}}`
   - `http://192.168.1.2:3579/unblock` → `POST {"url": "…/technical/", "content": true}`
   - `http://192.168.1.2:3579` → the same as `/content`; a bare `host:port` is taken as a
@@ -116,15 +118,77 @@ site, so **the app never scrapes it**. Two ways to get the data in:
     with `Authorization: Bearer <IMDB_FETCHER_TOKEN>` when a token is set, answering
     with the page source
 
-`IMDB_FETCHER_MODE` (`auto` by default) forces `query` or `browserless` when the
-endpoint name guesses wrong — a proxy of your own that happens to live at `/content`,
-say. A JSON response is unwrapped from any of `content`, `html`, `body`, `data`,
-`result` or `text`, so `/unblock` and most scraping APIs need nothing extra.
+`IMDB_FETCHER_MODE` (`auto` by default) forces `query`, `browserless` or `flaresolverr`
+when the endpoint name guesses wrong — a proxy of your own that happens to live at
+`/content`, say. A JSON response is unwrapped from `solution.response` (FlareSolverr's
+shape) or from any of `content`, `html`, `body`, `data`, `result` or `text`, so nothing
+needs a wrapper. A service that reports its own failure at HTTP 200 —
+`{"status": "error", …}` — is repeated to you rather than parsed. A page that turns out
+to be a bot check is asked for again (`IMDB_FETCHER_ATTEMPTS`, 4 by default) and then
+reported as one, because a challenge page and a film with no technical specifications
+are not the same thing.
 
 A pasted page always wins over a fetched one.
 
 If a fetch fails the app says so and carries on with the release year as the only clue
 to the grain, which it labels as a guess.
+
+### With FlareSolverr or Byparr
+
+IMDb sits behind an AWS WAF that answers a fresh browser with a JavaScript challenge —
+`awswaf.com/challenge.js`, a token, a reload — and escalates to a captcha when the
+fingerprint looks automated. [FlareSolverr](https://github.com/FlareSolverr/FlareSolverr)
+and [Byparr](https://github.com/ThePhaseless/Byparr) speak the same API, and the app
+sends the same request to either:
+
+```bash
+docker run -d -p 8191:8191 ghcr.io/flaresolverr/flaresolverr:latest          # this one
+docker run -d -p 8191:8191 -e BLOCK_MEDIA=true ghcr.io/thephaseless/byparr  # or this one
+```
+
+```dotenv
+IMDB_FETCHER_URL=http://192.168.1.2:8191/v1
+IMDB_FETCHER_TIMEOUT_SECONDS=90.0
+IMDB_FETCHER_ATTEMPTS=4
+```
+
+**Measured against IMDb, FlareSolverr comes back with the page and Byparr does not.**
+Neither service *recognises* an AWS WAF challenge — both look for Cloudflare's
+interstitial specifically — but the challenge answers itself: its script earns a token
+and reloads. What decides it is what happens next. FlareSolverr keeps one browser per
+session name, and the app names a session, so the token one attempt earned is still
+there for the next; the retry then gets the real page. Byparr reads the HTML before the
+reload lands and starts every request from a clean browser, so it returns the challenge
+page as a success however often it is asked. It stays supported — same contract, same
+code path — and works unchanged the day it learns AWS WAF.
+
+`IMDB_FETCHER_ATTEMPTS` (4 by default, 1 to 6) is how many times a page that is a bot
+check is asked for again; each attempt is a fresh request, so the worst case is that
+many times the timeout. A cold FlareSolverr session took three attempts to get past
+IMDb here — a challenge answer comes back in about a second, so the retries are cheap
+and the whole fetch took five seconds. When every attempt is met with a challenge the
+app names it rather than reporting a film with no technical specifications.
+
+`maxTimeout` is 90% of `IMDB_FETCHER_TIMEOUT_SECONDS`, so the service gives up and
+explains itself (`408 Timed out while loading the page or solving the challenge`)
+instead of having the connection cut from under it. Give it room: 20 seconds is only
+enough for a page that is not challenged at all. Byparr's `BLOCK_MEDIA=true` drops
+images, fonts and video, which is most of an IMDb page and none of what is parsed.
+Neither service needs a token; `IMDB_FETCHER_TOKEN` is still sent as a bearer header,
+for a reverse proxy in front.
+
+Check it before wiring it up:
+
+```bash
+curl -s http://192.168.1.2:8191/        # FlareSolverr's banner; Byparr answers /health
+for i in 1 2 3; do curl -s -X POST http://192.168.1.2:8191/v1 \
+  -H 'Content-Type: application/json' \
+  -d '{"cmd":"request.get","url":"https://www.imdb.com/title/tt0083658/technical/","session":"probe","maxTimeout":90000}' \
+  | wc -c; done
+```
+
+The first answers are a few kilobytes — that is the challenge page. One coming back
+about a megabyte long is the real thing, which is the retry doing its job.
 
 ### With browserless
 
@@ -153,10 +217,14 @@ curl -sD - -o /dev/null -X POST "http://192.168.1.2:3579/content?token=$TOKEN" \
   -d '{"url":"https://www.imdb.com/title/tt0083658/technical/"}'    # does IMDb answer it
 ```
 
-IMDb has a WAF, so plain `/content` may come back as a challenge page — the specs then
-read as empty and the app says it found nothing recognisable. If your image has
-`/unblock` (the stealth endpoint), point `IMDB_FETCHER_URL` at that instead; if not,
-pasting the page source is the path that always works.
+Browserless announces itself as `HeadlessChrome`, which IMDb's WAF blocks on sight, so
+the request overrides the browser's User-Agent and `Accept-Language` and asks for a
+best-attempt page. Even so, plain `/content` usually comes back as the WAF's challenge
+page: the specs then read as empty and the app says it found nothing recognisable.
+`/unblock` (browserless's stealth endpoint) does better, but it is not in the
+open-source image — `POST /unblock` answers 404 there, and nothing carries a solved
+token from one request to the next. For IMDb specifically, use FlareSolverr above;
+browserless remains useful for any page that is not challenged.
 
 ## Gemini (optional)
 
@@ -200,9 +268,10 @@ starts with an empty config, the home page reports which integrations are active
 | `GEMINI_MAX_OUTPUT_TOKENS`     | `2048`                           | Response cap                                                   |
 | `GEMINI_TEMPERATURE`           | `0.2`                            | Low on purpose: this is a settings decision                    |
 | `IMDB_FETCHER_URL`             | —                                | Optional `/technical` fetcher; pasting works without one       |
-| `IMDB_FETCHER_MODE`            | `auto`                           | `auto` / `query` / `browserless` — how to call the fetcher     |
+| `IMDB_FETCHER_MODE`            | `auto`                           | `query`, `browserless` or `flaresolverr` when auto guesses wrong |
 | `IMDB_FETCHER_TOKEN`           | —                                | Bearer header, plus `?token=` in browserless mode              |
-| `IMDB_FETCHER_TIMEOUT_SECONDS` | `20.0`                           | Per-request timeout; 45 suits browserless                      |
+| `IMDB_FETCHER_TIMEOUT_SECONDS` | `20.0`                           | Per-request timeout; 45 suits browserless, 90 FlareSolverr      |
+| `IMDB_FETCHER_ATTEMPTS`        | `4`                              | Retries when the fetcher is served a bot check (1–6)           |
 | `CACHE_TTL_SECONDS`            | `3600`                           | In-process TTL for TMDB, IMDb and Gemini results; `0` disables |
 | `HOST` / `PORT`                | `0.0.0.0` / `8080`               | Listen address                                                 |
 | `USER_AGENT`                   | `graindamage/0.7 …`              | Sent on every outbound request                                 |
