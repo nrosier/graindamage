@@ -5,6 +5,7 @@ Three layers, in dependency order:
 * :mod:`app.advice.grain` — how grainy is this film, and why.
 * :mod:`app.advice.rules` — the deterministic plans. No keys, no network, always works.
 * :mod:`app.advice.encoders` — those plans as FFmpeg / HandBrake commands and presets.
+* :mod:`app.advice.pipeline` — the tail both the web page and the CLI run, in one place.
 
 :mod:`app.advice.validate` guards the boundary where a language model's suggestions
 enter, and is used by :mod:`app.providers.gemini` rather than by anything here.
@@ -20,11 +21,15 @@ from app.advice.encoders import (
     render_handbrake_preset,
 )
 from app.advice.grain import infer_grain
+from app.advice.pipeline import LOOKED_UP_NOTE, Annotator, finish_advice
 from app.advice.rules import build_advice, parse_aspect_ratio
 
 __all__ = [
+    "LOOKED_UP_NOTE",
+    "Annotator",
     "attach_commands",
     "build_advice",
+    "finish_advice",
     "infer_grain",
     "output_name",
     "parse_aspect_ratio",

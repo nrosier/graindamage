@@ -25,9 +25,10 @@ from app.models import (
     SizePreference,
     SourceMedia,
     SpeedPreference,
+    TechnicalSpecs,
 )
 from app.sources import parse_source
-from tests.support import fixture, media, request_for, specs, video_track
+from tests.support import fixture, media, movie, request_for, specs, video_track
 
 
 def plans(**overrides: Any) -> tuple[EncoderPlan, EncoderPlan]:
@@ -541,6 +542,30 @@ def test_the_summary_copes_without_a_film() -> None:
 
     assert advice.summary is not None
     assert advice.summary.startswith("This source: 1080p source from an unknown origin format")
+
+
+# --- the fallback year ------------------------------------------------------
+
+
+def test_a_fallback_year_stands_in_for_a_film_nobody_looked_up() -> None:
+    """The CLI reads a year out of the filename; with no film, it is all grain has."""
+    advice = build_advice(request_for(movie=None, specs=specs_with_nothing(), fallback_year=1965))
+
+    assert advice.grain.level is GrainLevel.MODERATE
+    assert "1965" in " ".join(advice.grain.reasons)
+
+
+def test_a_looked_up_year_beats_a_parsed_one() -> None:
+    advice = build_advice(
+        request_for(movie=movie(year=1965), specs=specs_with_nothing(), fallback_year=2019)
+    )
+
+    assert "1965" in " ".join(advice.grain.reasons)
+
+
+def specs_with_nothing() -> TechnicalSpecs:
+    """Specs that say nothing about format, so the year is the only thing left."""
+    return specs(negative_formats=[], cinematographic_processes=[], printed_formats=[])
 
 
 # --- aspect ratios ----------------------------------------------------------

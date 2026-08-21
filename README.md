@@ -9,11 +9,13 @@ Every number comes with the reasoning attached: `CRF 27 = 28 for 1080p, −1 for
 grain`. Nothing is a black box, and nothing needs an API key — the rules engine has no
 configuration and no network, so an empty container still produces real settings.
 
-Runs as a single Docker image. Python 3.13 · FastAPI · Jinja2 · HTMX.
+Two front-ends over one engine: a web page, and a command line that takes a file and
+writes a HandBrake preset and an FFmpeg script beside it. Both ship in a single Docker
+image. Python 3.13 · FastAPI · Jinja2 · HTMX.
 
 ## Status
 
-Built in milestones; all seven are done (v0.7.0).
+Built in milestones; all eight are done (v0.8.0).
 
 | # | Milestone                                                        | State |
 | - | ---------------------------------------------------------------- | ----- |
@@ -24,6 +26,7 @@ Built in milestones; all seven are done (v0.7.0).
 | 5 | Gemini structured advice + encoder-flag validation               | done  |
 | 6 | HandBrake CLI / FFmpeg command and `.json` preset rendering      | done  |
 | 7 | Routes, caching, error states, docs polish                       | done  |
+| 8 | Command line: filename → ffprobe → film picker → two files       | done  |
 
 ## How it works
 
@@ -192,7 +195,7 @@ starts with an empty config, the home page reports which integrations are active
 | `GEMINI_WEB_GROUNDING`         | `true`                           | Let the specs look-up search the web instead of recalling      |
 | `CACHE_TTL_SECONDS`            | `3600`                           | In-process TTL for TMDB and Gemini results; `0` disables       |
 | `HOST` / `PORT`                | `0.0.0.0` / `8080`               | Listen address                                                 |
-| `USER_AGENT`                   | `graindamage/0.7 …`              | Sent on every outbound request                                 |
+| `USER_AGENT`                   | `graindamage/0.8 …`              | Sent on every outbound request                                 |
 | `DEBUG`                        | `false`                          | Verbose errors                                                 |
 
 Secrets are read from the environment only and never logged. The Gemini key travels in
@@ -217,6 +220,104 @@ not swap a non-2xx response into the page. A dead TMDB, a look-up that knows
 nothing, an unparseable paste and a silent Gemini each cost a warning, never the
 settings.
 
+## Command line
+
+The same engine without the browser: point it at a file and it reads the title out of the
+name, runs `ffprobe` on the file itself, offers the TMDB hits in an arrow-key list, looks
+the IMDb technical rows up through Gemini, and writes two files beside the film.
+
+```bash
+graindamage /movies/Blade.Runner.1982.2160p.BluRay.x265-GRP.mkv
+```
+
+`python -m app.cli <file>` is the same thing without installing the script.
+
+```text
+File     Blade.Runner.1982.2160p.BluRay.x265-GRP.mkv
+Film     Blade Runner (1982) — read from the filename
+
+Which film is this?
+ ▸ Blade Runner  1982  · matches the filename
+   Blade Runner 2049  2017
+   Wrong film — let me type the title
+   Stop, and write nothing
+  ↑↓ move · 1-9 jump · enter choose · q abort
+```
+
+Arrows or `k`/`j` move, `1`–`9` jump, Enter picks, `q` / Esc / Ctrl-C stops. Without a TTY
+— a pipe, or `docker run` without `-it` — the same list is numbered and read one line at a
+time. Prompts and progress go to stderr and the report to stdout, so
+`graindamage film.mkv > notes.txt` still shows you the menu.
+
+The filename is only a guess, and the line above the menu says what was made of it: the **last**
+year-shaped token wins (`Blade.Runner.2049.2017.2160p` → *Blade Runner 2049*, 2017), and a
+name with nothing in it (`movie.mkv`, `title00.mkv`) falls back to the directory it sits in,
+which is how `Blade Runner (1982)/movie.mkv` still finds the film. That year is also the
+last thing the grain estimate has to go on when no film was identified.
+
+When Gemini has no technical rows for the film, the `/technical` URL is printed and a paste
+box opens (Ctrl-D to finish). Ctrl-D on an empty box carries on with grain guessed from the
+release year, labelled in the report as a guess. `--specs FILE` skips the question.
+
+### What it writes
+
+Two files, named after the film, next to it — or in `--outdir`:
+
+| File | For |
+| ---- | --- |
+| `<name>.graindamage.json` | HandBrake: *Presets → Import from file*. One document holding **both** presets, so AV1 and x265 both appear in the list and you pick per queue item. |
+| `<name>.graindamage.sh` | FFmpeg: already `chmod +x`. The first plan runs; the other sits commented out directly beneath it, so switching encoder is deleting one `#`. |
+
+The script `cd`s to the film's directory and names the film by its basename, so one written
+inside a container still runs on the host that mounted it. Its header carries the film, the
+grain level and its reasons, and where the technical rows came from. Neither file is ever
+replaced without `--force`, and that check happens *before* the first request — a re-run
+says so at once instead of after a Gemini round trip.
+
+### Flags
+
+| Flag | Does |
+| ---- | ---- |
+| `--title TITLE` | Search for this instead of what the filename says |
+| `--year YEAR` | The release year, when the name has none |
+| `--imdb-id ttNNNNNNN` | Use this title id for the technical rows; enough on its own, with no TMDB key |
+| `--specs FILE` | Read the technical specifications from a file instead of asking Gemini |
+| `--encoder svt-av1\|x265` | Which encoder leads: the live command, and the first preset |
+| `--speed quality\|balanced\|fast` | How much CPU time you will spend |
+| `--size archival\|balanced\|compact` | Where to sit on the size/fidelity curve |
+| `--grain none\|light\|moderate\|heavy\|extreme` | State the grain instead of letting it be inferred |
+| `--bit-depth 8\|10\|12` | Force the encoding bit depth |
+| `--outdir DIR` | Write the two files here instead |
+| `--force` | Replace files that are already there |
+| `--no-gemini` | No Gemini at all: no review, no technical look-up |
+| `-y`, `--yes` | Take the best-matching hit without asking |
+| `--ffprobe PATH` | A non-default `ffprobe` |
+| `-q`, `--quiet` | Print only the two paths that were written |
+
+Exit codes:
+
+| Exit | Means |
+| ---- | ----- |
+| `0` | Both files written |
+| `1` | You stopped it; nothing was written |
+| `2` | Setup or usage: no such file, a directory, `ffprobe` missing or refusing the file, outputs already there, a bad flag |
+| `130` | Ctrl-C |
+
+No key is required. Without `TMDB_API_KEY` the run continues film-less on the file's own
+numbers; without `GEMINI_API_KEY` there is no look-up and no review. Each missing piece
+costs a warning in the report, never the settings.
+
+In the image, where `ffprobe` is already installed:
+
+```bash
+docker run --rm -it --env-file .env \
+  -v "$PWD:/media" --user "$(id -u):$(id -g)" \
+  graindamage graindamage /media/film.mkv
+```
+
+`--user` is what makes the two written files belong to you rather than to root, and `-it`
+is what gives the picker a terminal.
+
 ## Run with Docker
 
 ```bash
@@ -230,7 +331,10 @@ docker build -t graindamage .
 docker run --rm -p 8080:8080 --env-file .env graindamage
 ```
 
-The image runs as a non-root user and ships a `HEALTHCHECK` against `/healthz`.
+The image runs as a non-root user and ships a `HEALTHCHECK` against `/healthz`. It also
+carries `ffmpeg`, for the `ffprobe` the command line runs — which is most of its size
+(roughly 850 MB, against 260 MB without). See [Command line](#command-line) for running
+that inside the container.
 
 ## Local development
 
@@ -321,8 +425,16 @@ app/
   advice/
     grain.py            negative format and process → grain profile
     rules.py            the deterministic baseline: CRF, preset, parameters
+    pipeline.py         the tail both front-ends share: review, note, commands
     validate.py         allowlist for anything a model returns
     encoders.py         HandBrake and FFmpeg commands, HandBrake presets
+  cli/
+    app.py              the argparse surface and the run itself
+    filename.py         Movie.Title.1982.2160p… → title and year
+    probe.py            ffprobe as a subprocess, never a shell
+    prompts.py          the arrow-key picker, and its numbered fallback
+    report.py           the advice as terminal text
+    outputs.py          the .json preset and the .sh script it writes
   providers/
     tmdb.py             title search and metadata
     imdb.py             /technical parsing: paste or look-up
