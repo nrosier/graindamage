@@ -261,42 +261,168 @@ settings.
 
 ## Command line
 
-The same engine without the browser: point it at a file and it reads the title out of the
-name, runs `ffprobe` on the file itself, offers the TMDB hits in an arrow-key list, looks
-the IMDb technical rows up through Gemini, and writes two files beside the film.
+One command, one argument, and it asks you the rest:
 
 ```bash
-graindamage /movies/Blade.Runner.1982.2160p.BluRay.x265-GRP.mkv
+graindamage /media/Blade.Runner.1982.2160p.UHD.BluRay.DV.HDR.x265-GRP.mkv
 ```
 
-`python -m app.cli <file>` is the same thing without installing the script.
+That is the whole interface. It reads the title out of the filename, runs `ffprobe` on the
+file itself, and then walks you through four steps — each one a list you move a cursor
+through. `python -m app.cli <file>` is the same thing without installing the script.
+
+### Inside the container
+
+The image already carries `ffprobe`, so this is the shortest way in. `compose.yaml` mounts
+`MEDIA_DIR` (default `./media`) at `/media`, so there is something to point at:
+
+```bash
+echo 'MEDIA_DIR=/srv/films' >> .env    # your library
+docker compose up -d --build
+
+docker compose exec -u "$(id -u):$(id -g)" graindamage /bin/sh
+$ graindamage /media/Blade.Runner.1982.2160p.mkv
+```
+
+`graindamage` is on the `PATH` in there; `-u` is what makes the two written files belong to
+you rather than to the image's `app` user. One line, without the shell:
+
+```bash
+docker compose exec -u "$(id -u):$(id -g)" graindamage graindamage /media/film.mkv
+```
+
+Or with plain Docker, mounting the directory you are standing in:
+
+```bash
+docker run --rm -it --env-file .env \
+  -v "$PWD:/media" --user "$(id -u):$(id -g)" \
+  graindamage graindamage /media/film.mkv
+```
+
+`-it` is what gives the menus a terminal. Without one — a pipe, `docker exec` with `-T`,
+`docker run` without `-it` — every list falls back to a numbered prompt read one line at a
+time, and `--yes` skips the asking altogether.
+
+### The four steps
+
+Arrows or `k`/`j` move, `1`–`9` jump, Enter picks, `q` / Esc / Ctrl-C stops. The first row
+is always the way forward, so with both keys set **Enter four times is a complete run**: the
+film the filename agrees with, the rows looked up, the settings as inferred, written. A
+missing key takes rows away rather than adding work — there is never a row that cannot do
+anything.
 
 ```text
-File     Blade.Runner.1982.2160p.BluRay.x265-GRP.mkv
-Film     Blade Runner (1982) — read from the filename
+graindamage 0.8.0 — 4 steps to two files.
 
-Which film is this?
- ▸ Blade Runner  1982  · matches the filename
+File     Blade.Runner.1982.2160p.UHD.BluRay.DV.HDR.x265-GRP.mkv
+Source   3840×2160 · hevc · 10-bit · HDR · 23.976 fps · 62.0 Mb/s · 1h 56m · 26.3 GB · 1 audio
+Name     Blade Runner (1982) — read from the filename
+
+Step 1 of 4 · Which film is this?
    Blade Runner 2049  2017
-   Wrong film — let me type the title
+ ▸ Blade Runner  1982  · matches the filename
+   Search for another title  the filename is only a guess
+   Type the film's IMDb id  tt… — enough on its own for the rows
+   No film — settings from the file alone  grain then comes from the release year
    Stop, and write nothing
   ↑↓ move · 1-9 jump · enter choose · q abort
 ```
 
-Arrows or `k`/`j` move, `1`–`9` jump, Enter picks, `q` / Esc / Ctrl-C stops. Without a TTY
-— a pipe, or `docker run` without `-it` — the same list is numbered and read one line at a
-time. Prompts and progress go to stderr and the report to stdout, so
-`graindamage film.mkv > notes.txt` still shows you the menu.
+The cursor starts on the hit the filename's year agrees with, not on TMDB's first answer —
+which for this file is the 2049 sequel. An IMDb id typed here (the address works too, the
+id is read out of it) is enough on its own: it gets the technical rows with no TMDB key at
+all.
 
-The filename is only a guess, and the line above the menu says what was made of it: the **last**
-year-shaped token wins (`Blade.Runner.2049.2017.2160p` → *Blade Runner 2049*, 2017), and a
-name with nothing in it (`movie.mkv`, `title00.mkv`) falls back to the directory it sits in,
-which is how `Blade Runner (1982)/movie.mkv` still finds the film. That year is also the
-last thing the grain estimate has to go on when no film was identified.
+**Step 2** is where the technical rows come from, and every route to them is on it:
 
-When Gemini has no technical rows for the film, the `/technical` URL is printed and a paste
-box opens (Ctrl-D to finish). Ctrl-D on an empty box carries on with grain guessed from the
-release year, labelled in the report as a guess. `--specs FILE` skips the question.
+```text
+The aspect ratio, negative format and process are what decide the grain settings.
+  https://www.imdb.com/title/tt0083658/technical/
+
+Step 2 of 4 · The film's technical specifications
+ ▸ Ask Gemini for the rows  gemini-3.7-flash — a look-up, not IMDb
+   Paste the technical page yourself  https://www.imdb.com/title/tt0083658/technical/
+   Read the page out of a file
+   Skip — guess the grain from the release year  1982
+   Stop, and write nothing
+  ↑↓ move · 1-9 jump · enter choose · q abort
+```
+
+A look-up prints what it got and offers to keep it, so a wrong row can be replaced by a
+paste; the paste box prints the `/technical` address first and ends on Ctrl-D (Ctrl-D on
+its own skips). Paste beats look-up, always. Whichever route you took, the report says
+which one it was. See [IMDb technical specifications](#imdb-technical-specifications) for
+why IMDb is never fetched directly.
+
+**Step 3** is the encode, as a hub: pick a line, change it, come back to the hub.
+
+```text
+Step 3 of 4 · The encode
+ ▸ These are fine  on to the last step
+   Speed           balanced — SVT-AV1 preset 4, x265 slow
+   Size            balanced — the CRF the resolution anchors at
+   Grain           moderate (Super 35 mm) — inferred, confidence 90%
+   Bit depth       from the source — 10-bit
+   Encoder order   AV1 (SVT-AV1) first
+   Gemini review   on — it may move the CRF, and writes the prose
+   Stop, and write nothing
+  ↑↓ move · 1-9 jump · enter choose · q abort
+```
+
+Each sub-menu opens with the cursor on the value in force now, and the grain line is
+recomputed as you go — so setting the film's format by hand and watching the level move is
+the same one keypress as leaving it alone.
+
+**Step 4** shows what is about to happen and lets you go back to any of the three:
+
+```text
+Ready.
+  Film     Blade Runner (1982) · tt0083658
+  Rows     Gemini web search · confidence medium
+  Grain    moderate (Super 35 mm) — inferred, confidence 90%
+  Encode   balanced size, balanced speed, AV1 (SVT-AV1) first, Gemini review on
+  Write    /media/Blade.Runner.1982.2160p.UHD.BluRay.DV.HDR.x265-GRP.graindamage.json
+  Write    /media/Blade.Runner.1982.2160p.UHD.BluRay.DV.HDR.x265-GRP.graindamage.sh
+
+Step 4 of 4 · Write the two files?
+ ▸ Write them  a HandBrake preset and an FFmpeg script
+   Back to the film
+   Back to the technical rows
+   Back to the encode settings
+   Stop, and write nothing
+```
+
+Nothing is written until that Enter, nothing is overwritten without being asked — files
+already in the way are the *first* question, before any network call — and prompts go to
+stderr while the report goes to stdout, so `graindamage film.mkv > notes.txt` still shows
+you the menus.
+
+### No argument at all
+
+`graindamage` on its own offers what it can see: the current directory first, then
+`/media`, `/movies`, `/films`, `/video`, `/videos`, `/data` and `/mnt`, breadth-first, three
+directories down, twenty files at most.
+
+```text
+Which file? These are the ones I can see
+ ▸ films/Alien.1979.2160p.UHD.BluRay.mkv  41.5 GB
+   films/Blade.Runner.1982.2160p.UHD.BluRay.DV.HDR.x265-GRP.mkv  26.3 GB
+   films/Nosferatu.1922.1080p.BluRay.x264.mkv  8.1 GB
+   Type the path to a file  or a mount point
+  ↑↓ move · 1-9 jump · enter choose · q abort
+```
+
+A typed directory is descended into rather than refused, which is how a library too big to
+list is still navigable. With no terminal there is nobody to ask, so it exits 2 with the
+shape of the command instead.
+
+### What the filename is worth
+
+Only a guess, and the `Name` line says what was made of it: the **last** year-shaped token
+wins (`Blade.Runner.2049.2017.2160p` → *Blade Runner 2049*, 2017), and a name with nothing
+in it (`movie.mkv`, `title00.mkv`) falls back to the directory it sits in, which is how
+`Blade Runner (1982)/movie.mkv` still finds the film. That year is also the last thing the
+grain estimate has to go on when no film was identified.
 
 ### What it writes
 
@@ -309,11 +435,13 @@ Two files, named after the film, next to it — or in `--outdir`:
 
 The script `cd`s to the film's directory and names the film by its basename, so one written
 inside a container still runs on the host that mounted it. Its header carries the film, the
-grain level and its reasons, and where the technical rows came from. Neither file is ever
-replaced without `--force`, and that check happens *before* the first request — a re-run
-says so at once instead of after a Gemini round trip.
+grain level and its reasons, and where the technical rows came from.
 
 ### Flags
+
+Every one of them is optional, including the file. They exist to skip a step you already
+know the answer to — and, with `--no-menu` or `--yes`, to answer all of them at once from a
+script.
 
 | Flag | Does |
 | ---- | ---- |
@@ -329,7 +457,8 @@ says so at once instead of after a Gemini round trip.
 | `--outdir DIR` | Write the two files here instead |
 | `--force` | Replace files that are already there |
 | `--no-gemini` | No Gemini at all: no review, no technical look-up |
-| `-y`, `--yes` | Take the best-matching hit without asking |
+| `--no-menu` | Take the answers from these flags rather than asking step by step |
+| `-y`, `--yes` | No questions at all: the best-matching hit, no menus |
 | `--ffprobe PATH` | A non-default `ffprobe` |
 | `-q`, `--quiet` | Print only the two paths that were written |
 
@@ -339,29 +468,22 @@ Exit codes:
 | ---- | ----- |
 | `0` | Both files written |
 | `1` | You stopped it; nothing was written |
-| `2` | Setup or usage: no such file, a directory, `ffprobe` missing or refusing the file, outputs already there, a bad flag |
+| `2` | Setup or usage: no such file, a directory, no file to work on, `ffprobe` missing or refusing the file, outputs already there on the flag path, a bad flag |
 | `130` | Ctrl-C |
 
-No key is required. Without `TMDB_API_KEY` the run continues film-less on the file's own
-numbers; without `GEMINI_API_KEY` there is no look-up and no review. Each missing piece
-costs a warning in the report, never the settings.
-
-In the image, where `ffprobe` is already installed:
-
-```bash
-docker run --rm -it --env-file .env \
-  -v "$PWD:/media" --user "$(id -u):$(id -g)" \
-  graindamage graindamage /media/film.mkv
-```
-
-`--user` is what makes the two written files belong to you rather than to root, and `-it`
-is what gives the picker a terminal.
+No key is required. Without `TMDB_API_KEY` the film step offers the IMDb-id row and the
+film-less row instead of hits; without `GEMINI_API_KEY` there is no look-up row and no
+review line, and pasting is the way to the rows. Each missing piece costs a warning in the
+report, never the settings.
 
 ## Run with Docker
 
 ```bash
 docker compose up --build      # http://localhost:8080
 ```
+
+`compose.yaml` also mounts your films at `/media` — set `MEDIA_DIR` in `.env` to point it
+at your library — so that the command line inside the container has something to work on.
 
 Or without compose:
 
@@ -372,8 +494,9 @@ docker run --rm -p 8080:8080 --env-file .env graindamage
 
 The image runs as a non-root user and ships a `HEALTHCHECK` against `/healthz`. It also
 carries `ffmpeg`, for the `ffprobe` the command line runs — which is most of its size
-(roughly 850 MB, against 260 MB without). See [Command line](#command-line) for running
-that inside the container.
+(roughly 850 MB, against 260 MB without). See
+[Inside the container](#inside-the-container) for the two-line recipe: `docker compose
+exec` into a shell, then `graindamage /media/film.mkv`.
 
 ## Local development
 
@@ -469,6 +592,8 @@ app/
     encoders.py         HandBrake and FFmpeg commands, HandBrake presets
   cli/
     app.py              the argparse surface and the run itself
+    wizard.py           the four steps, and the file picker when given none
+    session.py          what both paths share: clients, rows, the two exceptions
     filename.py         Movie.Title.1982.2160p… → title and year
     probe.py            ffprobe as a subprocess, never a shell
     prompts.py          the arrow-key picker, and its numbered fallback

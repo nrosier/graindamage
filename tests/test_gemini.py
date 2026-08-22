@@ -827,6 +827,7 @@ def test_a_grounded_lookup_searches_and_is_parsed_leniently() -> None:
     assert "single JSON object" in body["systemInstruction"]["parts"][0]["text"]
     assert lookup.grounded
     assert "searching the web" in lookup.caveat
+    assert lookup.summary == "Gemini web search · confidence high"
     assert lookup.specs.negative_formats == ["35 mm"]
 
 
@@ -843,6 +844,8 @@ def test_without_grounding_the_lookup_is_held_to_the_schema() -> None:
     assert body["generationConfig"]["temperature"] == 0.0
     assert not lookup.grounded
     assert "recalled from training data" in lookup.caveat
+    # The same fact in a few words, for a list row that has no room for the sentence.
+    assert lookup.summary == "Gemini recall · confidence high"
 
 
 def test_a_model_without_grounding_is_asked_again_without_it() -> None:

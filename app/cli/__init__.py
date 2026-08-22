@@ -1,10 +1,16 @@
 """The command-line front-end.
 
-A second way in to the same advice: give it a file and it reads the title out of the
-name, ``ffprobe``s the file, asks who the film is, and writes a HandBrake preset and an
-FFmpeg script beside it. :mod:`app.cli.app` holds the flow; the rest is one concern each
-— :mod:`~app.cli.filename` reads names, :mod:`~app.cli.probe` runs ffprobe,
-:mod:`~app.cli.prompts` talks to the terminal, :mod:`~app.cli.report` and
+A second way in to the same advice, and one command wide: ``graindamage film.mkv`` reads
+the title out of the name, ``ffprobe``s the file, walks you through who the film is and
+where its technical rows come from, and writes a HandBrake preset and an FFmpeg script
+beside it.
+
+:mod:`app.cli.app` holds the flow — argument surface, the flag path, and the writing —
+and :mod:`app.cli.wizard` holds the menus a person gets instead of the flags. The two
+would import each other, so what they share (the clients, the prose, the specs a paste
+or a file turned into) lives in :mod:`app.cli.session`. The rest is one concern each:
+:mod:`~app.cli.filename` reads names, :mod:`~app.cli.probe` runs ffprobe,
+:mod:`~app.cli.prompts` moves a cursor over a list, :mod:`~app.cli.report` and
 :mod:`~app.cli.outputs` write the answer down.
 
 Nothing here is imported by the web app, and only :mod:`app.cli.probe` starts a process.

@@ -316,6 +316,12 @@ class SpecsLookup:
             "below if anything is wrong."
         )
 
+    @property
+    def summary(self) -> str:
+        """The same fact in a few words, for a list row with no room for a sentence."""
+        how = "web search" if self.grounded else "recall"
+        return f"Gemini {how} · confidence {self.confidence}"
+
 
 def _uses_synthesis(plan: EncoderPlan) -> bool:
     strength = plan.params.get("film-grain")

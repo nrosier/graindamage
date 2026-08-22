@@ -18,10 +18,11 @@ from typing import Any
 import httpx2
 import pytest
 
-from app.cli.app import EXIT_ABORTED, EXIT_OK, EXIT_SETUP, Context, main
+from app.cli.app import EXIT_ABORTED, EXIT_OK, EXIT_SETUP, main
 from app.cli.outputs import PRESET_SUFFIX, SCRIPT_SUFFIX
 from app.cli.probe import Runner
 from app.cli.prompts import Choice, Terminal
+from app.cli.session import Context
 from app.config import Settings
 from app.providers.gemini import GeminiClient
 from app.providers.tmdb import TmdbClient
@@ -140,7 +141,9 @@ class Pasting(Terminal):
     def interactive(self) -> bool:
         return True
 
-    def select[T](self, prompt: str, choices: Sequence[Choice[T]]) -> Choice[T] | None:
+    def select[T](
+        self, prompt: str, choices: Sequence[Choice[T]], *, start: int = 0
+    ) -> Choice[T] | None:
         self.write(prompt)
         return choices[0] if choices else None
 
