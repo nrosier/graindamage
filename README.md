@@ -66,6 +66,42 @@ measurements. The size estimate is a single exponential fit through one anchor p
 good enough to see that AV1 lands at roughly half the size, not good enough to plan a
 disc against.
 
+### Grain tuning
+
+Grain is what the settings are *for*, so both plans act on it directly rather than
+leaving it to the CRF. On SVT-AV1 the strength is the easy part and the denoise flag is
+the real decision:
+
+| Grain    | `film-grain` | `film-grain-denoise` | Effect                                       |
+| -------- | ------------ | -------------------- | -------------------------------------------- |
+| light    | 4            | 0                    | real grain coded, synthesis as a floor       |
+| moderate | 8            | 0                    | real grain coded, synthesis as a floor       |
+| heavy    | 12           | 1                    | denoise and re-synthesise — grain *is* the image |
+| extreme  | 20           | 1                    | denoise and re-synthesise                    |
+
+Below heavy grain, synthesis is a **floor over the coded grain, not a replacement for
+it**: with `film-grain-denoise=0` the grain in the picture is still encoded, and the
+synthesised layer only fills in where the quantiser flattened it — so a 35 mm look is
+never traded for a uniform synthetic field. `enable-restoration=0` goes with that path,
+because AV1's loop restoration is a Wiener filter, i.e. a denoiser, and it would smooth
+away what was just paid for. Where synthesis is on at all, the preset is capped at 6,
+which is where SVT-AV1 itself starts warning against film grain.
+
+x265 codes every particle instead. From moderate up it runs `--tune grain`, which raises
+psy-rd to 4.0 and psy-rdoq to 10 and turns off SAO, cu-tree, AQ and rskip — but, despite
+its reputation, does *not* touch qcomp or the deblocking offsets, so those are set by
+hand (`qcomp=0.8`, `deblock=-1`), along with `strong-intra-smoothing=0` on a film source.
+
+None of it applies to a clean source: synthesising grain over an image that never had any
+just lays noise on it, so a digital origin format gets no grain parameters at all.
+
+**Older negatives are tuned harder.** Stocks got finer, and dupe negatives and optical
+printing got rarer, so the same `35 mm` row means coarser, higher-contrast grain on a
+1962 film than on a 1998 one. At or before 1970, a photochemical source gets `film-grain`
++4 and `qp-scale-compress-strength=2` on AV1, and `qcomp=0.85` with `deblock=-2` on x265,
+each with the year named in the rationale. The era moves the tuning only — the inferred
+grain level, the CRF, the preset and the size estimate are all unchanged.
+
 ## Source formats
 
 Three parsers, all optional, all tolerant: a field that cannot be read becomes a
@@ -155,7 +191,10 @@ a guess.
 
 With `GEMINI_API_KEY` set, a checkbox appears that asks Gemini to review the
 deterministic plan. It can adjust CRF, preset, tune and parameters, and it writes the
-prose. It is never trusted:
+prose. On a film source the prompt requires it to answer with grain parameters and
+era-specific reasoning — which stock, which generation of print, `film-grain-denoise` one
+way or the other and why — and says outright that a plan moving the CRF and nothing else
+is not an answer. It is never trusted:
 
 - Everything it returns passes an **allowlist** in [`app/advice/validate.py`](app/advice/validate.py):
   a parameter is dropped unless it is a known parameter for that encoder *and* its value

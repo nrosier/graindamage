@@ -329,6 +329,22 @@ class GrainProfile(BaseModel):
     origin_format: str | None = None  # "35 mm", "16 mm", "digital"…
     user_override: bool = False
 
+    @property
+    def is_photochemical(self) -> bool:
+        """Whether the grain being protected came off a negative.
+
+        The distinction matters because grain settings that help a film source *hurt*
+        a clean one: synthesising grain over a digital image lays noise on a picture
+        that never had any. A hand-set level counts as film — the user is telling us
+        there is grain here to keep — but an unset ``origin_format`` does not, because
+        :func:`app.advice.grain.infer_grain` leaves it unset exactly when it could not
+        decide, and inventing grain on a maybe-digital film is the worse way to be
+        wrong.
+        """
+        if self.user_override:
+            return True
+        return self.origin_format is not None and self.origin_format != "digital"
+
 
 # --- advice -----------------------------------------------------------------
 

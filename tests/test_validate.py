@@ -75,6 +75,38 @@ def test_an_unknown_parameter_is_dropped_and_named() -> None:
     assert result.rejected == ["enable-warp-motion (not a recognised x265 parameter)"]
 
 
+def test_the_grain_knobs_the_prompt_asks_about_are_all_reachable() -> None:
+    # The prompt names these; if the allowlist did not have them, every answer the
+    # model gave about grain tuning would be silently thrown away.
+    wanted = {
+        "film-grain": "10",
+        "film-grain-denoise": "0",
+        "enable-restoration": "0",
+        "enable-cdef": "0",
+        "qp-scale-compress-strength": "2",
+        "luminance-qp-bias": "20",
+        "enable-variance-boost": "1",
+        "variance-boost-strength": "2",
+        "variance-octile": "6",
+        "variance-boost-curve": "1",
+        "tf-strength": "1",
+        "sharpness": "1",
+    }
+    result = validate_params(Encoder.SVT_AV1, wanted)
+
+    assert result.params == wanted
+    assert result.rejected == []
+
+
+def test_enable_hdr_stays_out_because_svt_av1_does_not_have_it() -> None:
+    # Measured: SVT-AV1 4.2.0 answers "Error parsing option enable-hdr", exactly as it
+    # does for an invented key. HDR is signalled through the colour parameters instead.
+    result = validate_params(Encoder.SVT_AV1, {"enable-hdr": "1"})
+
+    assert result.params == {}
+    assert result.rejected == ["enable-hdr (not a recognised svt-av1 parameter)"]
+
+
 def test_a_parameter_from_the_other_encoder_is_dropped() -> None:
     assert validate_params(Encoder.SVT_AV1, {"aq-strength": "0.9"}).params == {}
     assert validate_params(Encoder.X265, {"film-grain": "12"}).params == {}
@@ -84,7 +116,16 @@ def test_a_parameter_from_the_other_encoder_is_dropped() -> None:
     ("encoder", "name", "value"),
     [
         (Encoder.SVT_AV1, "film-grain", "60"),  # 0-50
+        # Ranges measured against SVT-AV1 4.2.0's own refusals.
         (Encoder.SVT_AV1, "tune", "9"),  # 0-2
+        (Encoder.SVT_AV1, "tune", "3"),  # 3 aborts a random-access encode outright
+        (Encoder.SVT_AV1, "qp-scale-compress-strength", "4"),  # 0-3
+        (Encoder.SVT_AV1, "luminance-qp-bias", "101"),  # 0-100
+        (Encoder.SVT_AV1, "variance-boost-strength", "0"),  # 1-4
+        (Encoder.SVT_AV1, "variance-boost-strength", "5"),  # 1-4
+        (Encoder.SVT_AV1, "variance-octile", "9"),  # 1-8
+        (Encoder.SVT_AV1, "variance-boost-curve", "3"),  # 0-2
+        (Encoder.SVT_AV1, "tf-strength", "5"),  # 0-4
         (Encoder.X265, "aq-strength", "9.5"),  # 0.0-3.0
         (Encoder.X265, "qcomp", "0.1"),  # 0.5-1.0
         (Encoder.X265, "rd", "0"),  # 1-6
@@ -175,9 +216,28 @@ def test_colour_names_are_checked_against_the_code_tables() -> None:
     assert validate_params(Encoder.X265, {"range": "tv"}).params == {}
 
 
-def test_deblock_and_level_patterns() -> None:
-    assert validate_params(Encoder.X265, {"deblock": "-1:-1"}).params == {"deblock": "-1:-1"}
+def test_deblock_takes_one_value_because_the_params_string_is_colon_joined() -> None:
+    # x265 applies a single value to both the tC and beta offsets.
+    assert validate_params(Encoder.X265, {"deblock": "-1"}).params == {"deblock": "-1"}
+    # "-1:-1" is how x265's own documentation writes it, and it is unusable here:
+    # params_string joins on ':', so libx265 reads "-1" as a parameter name
+    # ("Unknown option: -1:sao") and drops whatever parameter followed it.
+    assert validate_params(Encoder.X265, {"deblock": "-1:-1"}).params == {}
     assert validate_params(Encoder.X265, {"deblock": "loose"}).params == {}
+
+
+def test_no_value_may_contain_a_colon_whatever_the_parameter() -> None:
+    result = validate_params(Encoder.SVT_AV1, {"keyint": "240:1"})
+
+    assert result.params == {}
+    assert result.rejected == ["keyint (unsafe or empty value)"]
+    # And nothing legitimate needs one — not even the punctuation-heavy HDR values.
+    hdr = "G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,50)"
+    assert validate_params(Encoder.SVT_AV1, {"mastering-display": hdr}).params
+    assert validate_params(Encoder.X265, {"max-cll": "1000,400"}).params
+
+
+def test_level_patterns() -> None:
     assert validate_params(Encoder.X265, {"level-idc": "5.1"}).params == {"level-idc": "5.1"}
     assert validate_params(Encoder.X265, {"level-idc": "150"}).params == {"level-idc": "150"}
 
