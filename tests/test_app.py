@@ -524,7 +524,7 @@ def test_gemini_is_only_asked_when_the_box_is_ticked() -> None:
 
     ticked = client.post("/advise", data={"source_text": FFPROBE_REPORT, "use_gemini": "on"})
     assert len(seen) == 1
-    assert "reviewed by Gemini" in ticked.text
+    assert "decided by Gemini" in ticked.text
     assert "Reviewed for this film." in ticked.text
 
 

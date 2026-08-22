@@ -9,6 +9,12 @@ Every number comes with the reasoning attached: `CRF 27 = 28 for 1080p, −1 for
 grain`. Nothing is a black box, and nothing needs an API key — the rules engine has no
 configuration and no network, so an empty container still produces real settings.
 
+With a `GEMINI_API_KEY`, those rules become a **proposal** rather than the answer: Gemini
+is handed the film, its technical rows, the parse of your file and the deterministic plan,
+and it decides — a table keyed on resolution and negative format cannot know what this
+particular film and this particular transfer need. Without a key the proposal stands on
+its own.
+
 Two front-ends over one engine: a web page, and a command line that takes a file and
 writes a HandBrake preset and an FFmpeg script beside it. Both ship in a single Docker
 image. Python 3.13 · FastAPI · Jinja2 · HTMX.
@@ -72,12 +78,12 @@ Grain is what the settings are *for*, so both plans act on it directly rather th
 leaving it to the CRF. On SVT-AV1 the strength is the easy part and the denoise flag is
 the real decision:
 
-| Grain    | `film-grain` | `film-grain-denoise` | Effect                                       |
-| -------- | ------------ | -------------------- | -------------------------------------------- |
-| light    | 4            | 0                    | real grain coded, synthesis as a floor       |
-| moderate | 8            | 0                    | real grain coded, synthesis as a floor       |
-| heavy    | 12           | 1                    | denoise and re-synthesise — grain *is* the image |
-| extreme  | 20           | 1                    | denoise and re-synthesise                    |
+| Grain    | `film-grain` | `film-grain-denoise` | Max CRF | Effect                                   |
+| -------- | ------------ | -------------------- | ------- | ---------------------------------------- |
+| light    | 4            | 0                    | 29      | real grain coded, synthesis as a floor   |
+| moderate | 8            | 0                    | 27      | real grain coded, synthesis as a floor   |
+| heavy    | 12           | 1                    | —       | denoise and re-synthesise — grain *is* the image |
+| extreme  | 20           | 1                    | —       | denoise and re-synthesise                |
 
 Below heavy grain, synthesis is a **floor over the coded grain, not a replacement for
 it**: with `film-grain-denoise=0` the grain in the picture is still encoded, and the
@@ -86,6 +92,18 @@ never traded for a uniform synthetic field. `enable-restoration=0` goes with tha
 because AV1's loop restoration is a Wiener filter, i.e. a denoiser, and it would smooth
 away what was just paid for. Where synthesis is on at all, the preset is capped at 6,
 which is where SVT-AV1 itself starts warning against film grain.
+
+**The denoise flag and the CRF are one decision.** Telling the encoder to keep every
+grain particle and then giving it no bits to do it with is the worst of both: grain is
+high-frequency spatial noise, the budget runs out, and what was meant to be grain becomes
+swirling blocks in motion. So a plan that codes real grain is capped — CRF 27, or 29 for
+a fine-grained large-format negative — and the clamp shows up as a named `real grain
+ceiling` adjustment like any other. A plan that wants a higher CRF has to earn it by
+denoising instead: ask for a **compact** target at 2160p, or feed it a source thin enough
+that what is left of its grain is half compression artefact, and `film-grain-denoise`
+flips to 1, the strength rises to a full replacement field (6 for light, 10 for moderate)
+and the CRF stands. Either way you get a coherent plan and the rationale says which trade
+was made.
 
 x265 codes every particle instead. From moderate up it runs `--tune grain`, which raises
 psy-rd to 4.0 and psy-rdoq to 10 and turns off SAO, cu-tree, AQ and rskip — but, despite
@@ -189,20 +207,34 @@ a guess.
 
 ## Gemini (optional)
 
-With `GEMINI_API_KEY` set, a checkbox appears that asks Gemini to review the
-deterministic plan. It can adjust CRF, preset, tune and parameters, and it writes the
-prose. On a film source the prompt requires it to answer with grain parameters and
-era-specific reasoning — which stock, which generation of print, `film-grain-denoise` one
-way or the other and why — and says outright that a plan moving the CRF and nothing else
-is not an answer. It is never trusted:
+With `GEMINI_API_KEY` set, a checkbox appears that hands the decision to Gemini. **The
+rules engine proposes; Gemini decides.** It is given the film, the IMDb technical rows and
+the parse of your source file, and the deterministic plan arrives labelled as what it is —
+`"made_by": "deterministic rules engine — tables only, has not read this film"`. Where it
+disagrees, it changes the number and says why in the rationale. A table keyed on
+resolution and negative format cannot know that this particular transfer was already
+denoised, or that this negative is a fine-grained late camera stock rather than a dupe;
+the model has read enough about the film to weigh that, so it gets the last word.
+
+That means the CRF may go anywhere in the encoder's legal range — 10–55 for SVT-AV1,
+10–40 for x265 — with no cap on how far it moves from the proposal. On a film source the
+prompt requires grain parameters and era-specific reasoning (which stock, which generation
+of print, `film-grain-denoise` one way or the other and why), says outright that a plan
+moving the CRF and nothing else is not an answer, and states the real-grain CRF ceiling as
+a number to reason with rather than a rule to obey.
+
+What is still enforced is only what would otherwise produce a broken command, or a
+silently wrong picture:
 
 - Everything it returns passes an **allowlist** in [`app/advice/validate.py`](app/advice/validate.py):
   a parameter is dropped unless it is a known parameter for that encoder *and* its value
   is in range *and* the value contains no shell-interesting characters.
-- CRF may move at most **4 points** from the baseline, and stays inside the encoder's
-  usable range.
+- CRF is clamped to the encoder's **usable range**, and to nothing narrower.
 - Parameters derived from your file's own colour signalling are **restored after
   validation** — the model cannot see the file, so it has no business changing them.
+- A plan that codes real grain above the ceiling is **reported, never rewritten**: you get
+  a warning pointing at the SVT-AV1 rationale so you can check whether this film is the
+  exception the model thought it was.
 - Everything dropped is shown to you, so a disagreement is visible rather than silent.
 
 The prompt deliberately excludes your local input path. Commands are assembled with
@@ -364,7 +396,7 @@ Step 3 of 4 · The encode
    Grain           moderate (Super 35 mm) — inferred, confidence 90%
    Bit depth       from the source — 10-bit
    Encoder order   AV1 (SVT-AV1) first
-   Gemini review   on — it may move the CRF, and writes the prose
+   Gemini          deciding — the rules below are its proposal
    Stop, and write nothing
   ↑↓ move · 1-9 jump · enter choose · q abort
 ```
@@ -380,7 +412,7 @@ Ready.
   Film     Blade Runner (1982) · tt0083658
   Rows     Gemini web search · confidence medium
   Grain    moderate (Super 35 mm) — inferred, confidence 90%
-  Encode   balanced size, balanced speed, AV1 (SVT-AV1) first, Gemini review on
+  Encode   balanced size, balanced speed, AV1 (SVT-AV1) first, Gemini deciding
   Write    /media/Blade.Runner.1982.2160p.UHD.BluRay.DV.HDR.x265-GRP.graindamage.json
   Write    /media/Blade.Runner.1982.2160p.UHD.BluRay.DV.HDR.x265-GRP.graindamage.sh
 
@@ -456,7 +488,7 @@ script.
 | `--bit-depth 8\|10\|12` | Force the encoding bit depth |
 | `--outdir DIR` | Write the two files here instead |
 | `--force` | Replace files that are already there |
-| `--no-gemini` | No Gemini at all: no review, no technical look-up |
+| `--no-gemini` | No Gemini at all: the rules engine decides, and no technical look-up |
 | `--no-menu` | Take the answers from these flags rather than asking step by step |
 | `-y`, `--yes` | No questions at all: the best-matching hit, no menus |
 | `--ffprobe PATH` | A non-default `ffprobe` |

@@ -10,6 +10,11 @@ The policy is an allowlist, not a denylist: a parameter is dropped unless it is 
 below *and* its value is in range. Everything dropped is reported, so the UI can say
 what was ignored rather than silently disagreeing with the model.
 
+What is checked here is whether a setting *exists and is legal*, never whether it is a
+good idea. The model has the film, the technical rows and the parse of the source file,
+so it is better placed to weigh those than any table in this repository; a parameter is
+refused only when the encoder itself would refuse it.
+
 Values are also character-restricted. Commands are built with :func:`shlex.join`, so
 this is defence in depth rather than the only barrier — but a parameter value has no
 legitimate reason to contain a backtick.
@@ -35,9 +40,6 @@ _SAFE_VALUE = re.compile(r"^[A-Za-z0-9_.,()+/=-]{1,120}$")
 _SAFE_NAME = re.compile(r"^[a-z][a-z0-9-]{0,40}$")
 
 MAX_PARAMS = 40
-# How far the model may move a CRF from the deterministic baseline. Wide enough for a
-# real disagreement, narrow enough that a hallucinated 51 cannot land in the command.
-MAX_CRF_DRIFT = 4.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -296,19 +298,24 @@ def validate_params(encoder: Encoder, params: dict[str, str]) -> ValidationResul
     return ValidationResult(params=kept, rejected=rejected)
 
 
-def validate_crf(encoder: Encoder, crf: float, baseline: float) -> tuple[float, str | None]:
-    """Clamp a CRF to the encoder's usable range and to the baseline's neighbourhood."""
+def validate_crf(encoder: Encoder, crf: float) -> tuple[float, str | None]:
+    """Clamp a CRF to the encoder's usable range, and only to that.
+
+    How far a model may move the CRF from the rules engine's proposal is deliberately
+    not bounded: the model is the one that has read the film, its technical rows and the
+    parse of the source, and a table keyed on resolution and negative format is a
+    starting point rather than a verdict. What stays enforced is the encoder's own legal
+    range, because a number outside it is not a judgement — it is a broken command.
+    """
     low, high = CRF_LIMITS[encoder]
-    clamped = max(low, min(float(crf), high))
-    drift_low, drift_high = baseline - MAX_CRF_DRIFT, baseline + MAX_CRF_DRIFT
-    bounded = max(drift_low, min(clamped, drift_high))
+    bounded = max(low, min(float(crf), high))
 
     if abs(bounded - float(crf)) < 0.01:
         return round(bounded, 1), None
     return (
         round(bounded, 1),
-        f"CRF {crf:g} was pulled back to {bounded:g} — more than "
-        f"{MAX_CRF_DRIFT:g} points from the {baseline:g} the rules give.",
+        f"CRF {crf:g} was clamped to {bounded:g} — outside {encoder.value}'s usable "
+        f"range of {low:g}–{high:g}.",
     )
 
 

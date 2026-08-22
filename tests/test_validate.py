@@ -11,7 +11,6 @@ import pytest
 from app.advice.validate import (
     ALLOWED_PARAMS,
     CRF_LIMITS,
-    MAX_CRF_DRIFT,
     MAX_PARAMS,
     PROTECTED_PARAMS,
     Choice,
@@ -266,41 +265,39 @@ def test_rule_types_reject_what_they_cannot_parse() -> None:
 # --- CRF --------------------------------------------------------------------
 
 
-def test_a_crf_close_to_the_baseline_is_accepted_silently() -> None:
-    assert validate_crf(Encoder.X265, 22.0, baseline=20.0) == (22.0, None)
-    assert validate_crf(Encoder.SVT_AV1, 30.5, baseline=28.0) == (30.5, None)
+def test_any_crf_inside_the_encoders_range_is_accepted_silently() -> None:
+    """How far the model moved from the proposal is not this module's business.
+
+    The model has the film, its technical rows and the parse of the source file; the
+    proposal came from tables. A large move is a disagreement to be shown to the user,
+    not an error to be corrected here.
+    """
+    assert validate_crf(Encoder.X265, 22.0) == (22.0, None)
+    assert validate_crf(Encoder.SVT_AV1, 30.5) == (30.5, None)
+    # Both far outside the old ±4 of any baseline the rules engine produces.
+    assert validate_crf(Encoder.X265, 14.0) == (14.0, None)
+    assert validate_crf(Encoder.SVT_AV1, 45.0) == (45.0, None)
 
 
-def test_a_crf_far_from_the_baseline_is_pulled_back_with_an_explanation() -> None:
-    value, note = validate_crf(Encoder.X265, 30.0, baseline=20.0)
-
-    assert value == 24.0  # baseline + MAX_CRF_DRIFT
-    assert note is not None
-    assert "pulled back to 24" in note
-    assert "4 points" in note
-
-
-def test_the_drift_bound_applies_in_both_directions() -> None:
-    value, note = validate_crf(Encoder.X265, 12.0, baseline=20.0)
-
-    assert value == 16.0
-    assert note is not None
-
-
-def test_a_crf_outside_the_encoders_range_is_clamped_first() -> None:
-    # SVT-AV1 tops out at 55 here; a hallucinated 63 must not become baseline+4.
-    value, note = validate_crf(Encoder.SVT_AV1, 63.0, baseline=52.0)
+def test_a_crf_the_encoder_would_refuse_is_clamped_with_an_explanation() -> None:
+    """The one bound left: outside this a number is not a judgement, it is a bad command."""
+    value, note = validate_crf(Encoder.SVT_AV1, 63.0)
 
     assert value == 55.0
     assert note is not None
+    assert "clamped to 55" in note
+    assert "usable range" in note
 
 
-def test_exactly_at_the_drift_limit_is_allowed() -> None:
-    assert validate_crf(Encoder.X265, 20.0 + MAX_CRF_DRIFT, baseline=20.0) == (24.0, None)
+def test_the_range_is_clamped_at_the_bottom_too() -> None:
+    value, note = validate_crf(Encoder.X265, 4.0)
+
+    assert value == 10.0
+    assert note is not None
 
 
 def test_crf_is_rounded_to_one_decimal() -> None:
-    value, _ = validate_crf(Encoder.X265, 20.1234, baseline=20.0)
+    value, _ = validate_crf(Encoder.X265, 20.1234)
     assert value == 20.1
 
 

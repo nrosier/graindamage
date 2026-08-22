@@ -23,7 +23,7 @@
     {% endif %}
     {% if video and video.is_hdr %}<li class="badge hdr">HDR</li>{% endif %}
     <li class="badge {{ 'ai' if advice.source.value == 'gemini' else '' }}">
-      {{ "reviewed by Gemini" if advice.source.value == "gemini" else "deterministic rules" }}
+      {{ "decided by Gemini" if advice.source.value == "gemini" else "deterministic rules" }}
     </li>
   </ul>
 

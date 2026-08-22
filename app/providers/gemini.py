@@ -1,27 +1,44 @@
-"""Gemini as a second opinion on the deterministic plan — never as the only opinion.
+"""Gemini decides the settings; the rules engine proposes them.
 
-The rules engine has already produced complete, usable settings by the time this
-module runs. Gemini's job is narrow: look at the film, the source and the baseline,
-and say where the baseline is wrong. It is asked for structured output
-(``responseMimeType: application/json`` plus a ``responseSchema``), and everything it
-returns passes through :mod:`app.advice.validate` before it can reach a command line.
+This is where the advice is actually made. :mod:`app.advice.rules` gets there first and
+produces a complete, coherent plan from tables keyed on resolution, negative format and
+release year — but tables cannot read a film. The model can: it is given the production
+details, the IMDb technical rows, a full parse of the user's source file, the
+preferences, and the rules engine's plan *as a proposal*, and it is asked to decide what
+this particular film should be encoded with. Where it disagrees with the proposal, it
+wins, and the disagreement is shown to the user as a labelled adjustment rather than
+hidden.
 
-What the model is *allowed* to change:
+It is asked for structured output (``responseMimeType: application/json`` plus a
+``responseSchema``), and everything it returns passes through
+:mod:`app.advice.validate` before it can reach a command line.
 
-* CRF, within :data:`app.advice.validate.MAX_CRF_DRIFT` of the baseline.
+What the model decides:
+
+* CRF, anywhere inside the encoder's own legal range. There is no bound on how far it
+  may move from the proposal — the reasoning behind a number is what makes it right,
+  and the model is the only party here that has seen the film.
 * Preset and (for x265) tune, from the real ladders.
-* Allowlisted encoder parameters — it can add or change them, but not remove them.
+* The grain strategy: whether this negative's own grain is coded or denoised and
+  re-synthesised, and every parameter that follows from that choice.
+* Any allowlisted encoder parameter — it can add or change them, but not remove them.
   Losing ``keyint`` or a colour tag because a model omitted it from its answer is a
-  worse failure than being unable to drop ``sao=0``.
+  worse failure than being unable to drop ``sao=0``; every parameter that matters has
+  an explicit off value to set instead.
 * The prose: summary, notes, warnings, per-plan rationale.
 
 What it can never change: the colour and HDR parameters. Those are read off the
 source file, which the model cannot see, so it has nothing to contribute and a
 corrupted ``master-display`` string would silently ruin the encode.
 
+The one thing checked after the fact is coherence, and it is reported rather than
+overruled: a plan that codes real grain at a CRF too high to carry it gets a warning
+naming both halves, because that pairing is the commonest way for good reasoning about
+each setting separately to add up to a bad encode.
+
 Any failure at all — no key, timeout, refusal, truncated JSON, schema mismatch —
-returns the baseline with a warning. There is no path where a Gemini problem costs
-the user their advice.
+returns the rules engine's proposal with a warning. There is no path where a Gemini
+problem costs the user their advice.
 
 This module has one other job: :meth:`GeminiClient.technical_specs` asks for a film's
 IMDb ``/technical`` rows, because IMDb's WAF means the app cannot read that page
@@ -39,9 +56,9 @@ from typing import Any
 
 import httpx2
 
-from app.advice.rules import estimate_bitrate
+from app.advice.rules import REAL_GRAIN_CRF_CEILING, estimate_bitrate
 from app.advice.validate import (
-    MAX_CRF_DRIFT,
+    CRF_LIMITS,
     PROTECTED_PARAMS,
     SVT_AV1_PARAMS,
     X265_PARAMS,
@@ -182,35 +199,54 @@ to be. Do not inflate it.
 """
 
 SYSTEM_PROMPT = f"""\
-You are a video encoding engineer reviewing a proposed archival re-encode of a film. \
-You are given the film's production details, IMDb technical rows, a parse of the \
-user's source file, and a baseline plan produced by a deterministic rules engine.
+You are the video encoding engineer deciding how a film should be re-encoded. You are \
+given the film's production details, IMDb technical rows, a full parse of the user's \
+source file, the user's preferences, and a proposal from a deterministic rules engine.
 
-Your job is to correct the baseline where it is wrong for this particular film, and to \
-say what the rules engine cannot know. The baseline is usually close. Returning it \
-almost unchanged, with one or two genuinely film-specific observations, is a good \
-answer; inventing changes to look useful is not.
+The proposal is a starting point, not a verdict. It comes from tables keyed on \
+resolution, negative format and release year, and it knows nothing about this film \
+beyond those rows. You do. Decide what this film should actually be encoded with. Where \
+you disagree with the proposal, change it and say why in the rationale — the difference \
+is shown to the user as your adjustment, not hidden. Returning the proposal unchanged is \
+the right answer when it is right, and inventing changes to look useful is not; but do \
+not defer to it out of caution either.
 
 Rules you must follow:
 
 1. Return both encoder plans, using the exact encoder ids given.
-2. Keep each CRF within {MAX_CRF_DRIFT:g} points of the baseline CRF for that encoder. \
-Anything further is clamped and your reasoning is discarded.
-3. SVT-AV1 presets are integers 0-13 (lower is slower). x265 presets are names: \
+2. Put each CRF where this film needs it: {CRF_LIMITS[Encoder.SVT_AV1][0]:g}-\
+{CRF_LIMITS[Encoder.SVT_AV1][1]:g} for SVT-AV1, {CRF_LIMITS[Encoder.X265][0]:g}-\
+{CRF_LIMITS[Encoder.X265][1]:g} for x265. There is no limit on how far you may move it \
+from the proposal. Say what the move costs or saves in size, because the user sees the \
+estimate move with it.
+3. Grain and CRF are one decision, not two, and separating them is the failure this tool \
+exists to prevent. Real grain is high-frequency spatial noise, so if you leave it in the \
+picture to be coded — SVT-AV1 film-grain-denoise=0, or x265, which has no synthesis and \
+always codes it — you have to fund it. For SVT-AV1 that means about CRF \
+{REAL_GRAIN_CRF_CEILING:g} or below at 2160p and lower again at 1080p, where a grain \
+particle covers fewer pixels. Above that the bit budget runs out mid-frame and the grain \
+breaks up into swirling blocks in motion, which is worse than either honest choice. If \
+the size the user asked for will not pay for coded grain, denoise and re-synthesise \
+instead: film-grain-denoise=1 with a strength that carries the whole look rather than a \
+floor, and keep the higher CRF. What you must not return is real grain coded at a CRF \
+that cannot carry it. If this particular film is the exception — a fine-grained late \
+camera negative, a source already denoised by whoever mastered it — say so in the \
+rationale and your numbers stand.
+4. SVT-AV1 presets are integers 0-13 (lower is slower). x265 presets are names: \
 {", ".join(sorted(X265_PRESETS))}. x265 tunes are: {", ".join(sorted(X265_TUNES))}. \
 SVT-AV1 has no named tune — its tune is the numeric `tune` parameter.
-4. Only these SVT-AV1 parameters exist for you: {", ".join(sorted(SVT_AV1_PARAMS))}.
-5. Only these x265 parameters exist for you: {", ".join(sorted(X265_PARAMS))}.
-6. Do not return colour, HDR, mastering-display or content-light parameters. They are \
+5. Only these SVT-AV1 parameters exist for you: {", ".join(sorted(SVT_AV1_PARAMS))}.
+6. Only these x265 parameters exist for you: {", ".join(sorted(X265_PARAMS))}.
+7. Do not return colour, HDR, mastering-display or content-light parameters. They are \
 read from the source file and will be overwritten with the file's own values.
-7. Parameters you omit keep their baseline values. You cannot delete a parameter, only \
+8. Parameters you omit keep their baseline values. You cannot delete a parameter, only \
 change or add one.
-8. Prose must be specific and plain. No marketing adjectives, no restating the \
+9. Prose must be specific and plain. No marketing adjectives, no restating the \
 baseline's own rationale, no explaining what CRF is. If you have nothing to add for a \
 plan, return an empty rationale list.
-9. Grain is the priority: this tool exists to stop film grain being smoothed into \
+10. Grain is the priority: this tool exists to stop film grain being smoothed into \
 mush. If your suggestion trades grain for size, say so explicitly.
-10. Answer with grain settings, not only a CRF. For a source shot on film, decide and \
+11. Answer with grain settings, not only a CRF. For a source shot on film, decide and \
 justify, per encoder:
   - SVT-AV1: the film-grain strength, and above all film-grain-denoise — 1 denoises the \
 picture and replaces its grain with a uniform synthetic field, 0 leaves the real grain \
@@ -225,18 +261,18 @@ AQ and rskip — but it does not touch qcomp or the deblocking offsets, so move 
 yourself if you want them moved. Then aq-mode and aq-strength, sao / selective-sao / \
 limit-sao, strong-intra-smoothing, psy-rd and psy-rdoq, rd and rdoq-level.
 A plan that moves the CRF and nothing else is not an answer for a film source.
-11. Older films need their own answer, and the year alone is not it: stock, dupe \
+12. Older films need their own answer, and the year alone is not it: stock, dupe \
 negatives and optical printing are what decide the grain. A pre-1970 negative, a \
 blow-up, and anything printed through a dupe carry coarser, higher-contrast grain than a \
 late-1990s camera negative, and older restorations often carry scanner noise and gate \
 weave on top of the real grain. Use the year, country, director and format rows you were \
 given to say which of those this film is, then tune for that case — including whether \
 its grain should be coded or synthesised rather than either by default.
-12. No parameter value may contain a colon. The parameters are joined with ':' into one \
+13. No parameter value may contain a colon. The parameters are joined with ':' into one \
 -svtav1-params / -x265-params string, and a colon inside a value makes the encoder read \
 the far half as a parameter name and drop the one after it. Write deblock=-1, which x265 \
 applies to both offsets, never deblock=-1:-1.
-13. If the source looks like a bad candidate for re-encoding at all, put that in \
+14. If the source looks like a bad candidate for re-encoding at all, put that in \
 warnings rather than quietly encoding it anyway.
 """
 
@@ -586,10 +622,15 @@ _SPECS_PROVENANCE: dict[SpecsSource | None, str] = {
 
 
 def build_context(request: EncodeRequest, baseline: Advice) -> dict[str, Any]:
-    """The facts the model gets. Compact on purpose: no keys, no paths, no filenames.
+    """The facts the model decides on. Compact on purpose: no keys, no paths, no filenames.
 
-    The input path is deliberately excluded — it is a local filesystem path that the
-    model has no use for and no business seeing.
+    Everything known about the film, its negative and the source file goes in, because
+    the model is the one weighing them against each other. The input path is deliberately
+    excluded — it is a local filesystem path that the model has no use for and no
+    business seeing.
+
+    The rules engine's plan goes in under ``proposal``, named that way on purpose: it is
+    what the tables produced, not what the answer has to be.
     """
     context: dict[str, Any] = {
         "preferences": {"speed": request.speed.value, "size": request.size.value},
@@ -603,20 +644,27 @@ def build_context(request: EncodeRequest, baseline: Advice) -> dict[str, Any]:
             "reasons": baseline.grain.reasons,
             "set_by_user": baseline.grain.user_override,
         },
-        "baseline_plans": [
-            {
-                "encoder": plan.encoder.value,
-                "crf": plan.crf,
-                "preset": plan.preset,
-                "tune": plan.tune,
-                "params": plan.params,
-                "rationale": plan.rationale,
-                "estimated_bitrate_bps": plan.estimated_bitrate_bps,
-            }
-            for plan in baseline.plans
-        ],
-        "baseline_notes": baseline.notes,
-        "baseline_warnings": baseline.warnings,
+        "proposal": {
+            "made_by": "deterministic rules engine — tables only, has not read this film",
+            "plans": [
+                {
+                    "encoder": plan.encoder.value,
+                    "crf": plan.crf,
+                    "preset": plan.preset,
+                    "tune": plan.tune,
+                    "params": plan.params,
+                    "rationale": plan.rationale,
+                    "estimated_bitrate_bps": plan.estimated_bitrate_bps,
+                }
+                for plan in baseline.plans
+            ],
+            "notes": baseline.notes,
+            "warnings": baseline.warnings,
+            # Stated rather than enforced: the rules engine holds itself to this, and the
+            # model is told the number so it can decide with it instead of tripping over
+            # it. A plan that goes above it and says why is accepted as it stands.
+            "svt_av1_real_grain_crf_ceiling": REAL_GRAIN_CRF_CEILING,
+        },
     }
 
     if (movie := request.movie) is not None:
@@ -740,7 +788,7 @@ def merge_advice(baseline: Advice, payload: dict[str, Any], request: EncodeReque
             rejected.append(f"a {encoder.value} plan the baseline does not have")
             continue
         handled.add(encoder)
-        rejected.extend(_apply_plan(plan, row, baseline, request))
+        rejected.extend(_apply_plan(plan, row, baseline, request, reviewed.warnings))
 
     reviewed.source = AdviceSource.GEMINI
     reviewed.rejected_flags = rejected
@@ -764,16 +812,20 @@ def _encoder_from(value: object) -> Encoder | None:
 
 
 def _apply_plan(
-    plan: EncoderPlan, row: dict[str, Any], baseline: Advice, request: EncodeRequest
+    plan: EncoderPlan,
+    row: dict[str, Any],
+    baseline: Advice,
+    request: EncodeRequest,
+    warnings: list[str],
 ) -> list[str]:
-    """Validate one model plan onto its baseline plan, in place."""
+    """Validate one model plan onto the proposal it answers, in place."""
     rejected: list[str] = []
     encoder = plan.encoder
     original_crf = plan.crf
 
     raw_crf = row.get("crf")
     if isinstance(raw_crf, int | float) and not isinstance(raw_crf, bool):
-        crf, complaint = validate_crf(encoder, float(raw_crf), original_crf)
+        crf, complaint = validate_crf(encoder, float(raw_crf))
         if complaint:
             rejected.append(complaint)
         plan.crf = crf
@@ -839,7 +891,37 @@ def _apply_plan(
             synthesised=_uses_synthesis(plan),
         )
 
+    if (complaint := _starved_grain(plan)) is not None:
+        warnings.append(complaint)
+
     return rejected
+
+
+def _starved_grain(plan: EncoderPlan) -> str | None:
+    """Report — never rewrite — a plan that codes real grain it cannot afford.
+
+    The model decides the settings, so this does not touch its numbers. But coding the
+    negative's own grain at a CRF with no budget for it is the one pairing where sound
+    reasoning about each setting on its own adds up to an encode that visibly breaks in
+    motion, so the user is told both halves and can judge the model's reasoning for
+    themselves.
+    """
+    if plan.encoder is not Encoder.SVT_AV1:
+        return None
+    strength = plan.params.get("film-grain")
+    if not strength or strength == "0":
+        return None
+    if plan.params.get("film-grain-denoise") != "0":
+        return None
+    if plan.crf <= REAL_GRAIN_CRF_CEILING:
+        return None
+    return (
+        f"SVT-AV1 is set to code this film's own grain (film-grain-denoise=0) at CRF "
+        f"{plan.crf:g}, above the {REAL_GRAIN_CRF_CEILING:g} that coded grain usually "
+        "needs — check the SVT-AV1 rationale for why this film is an exception. If it is "
+        f"not, either bring the CRF to {REAL_GRAIN_CRF_CEILING:g} or set "
+        "film-grain-denoise=1 and let the grain be re-synthesised instead."
+    )
 
 
 def _uses_synthesis_of(advice: Advice, encoder: Encoder) -> bool:

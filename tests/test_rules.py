@@ -125,20 +125,27 @@ def test_light_grain_moves_nothing() -> None:
 
 
 @pytest.mark.parametrize(
-    ("bitrate", "delta"),
+    ("bitrate", "delta", "crf", "denoise"),
     [
-        (20_000_000, 0.0),  # 0.402 bpp — disc
-        (5_000_000, 0.5),  # 0.101 bpp — good web release
-        (3_000_000, 1.5),  # 0.060 bpp — modestly compressed
-        (1_500_000, 2.5),  # 0.030 bpp — heavily compressed
+        (20_000_000, 0.0, 27.0, "0"),  # 0.402 bpp — disc
+        # 27.5 would be above the ceiling for coded grain, and a good web release is
+        # still worth coding faithfully, so the ceiling takes the half point back.
+        (5_000_000, 0.5, 27.0, "0"),  # 0.101 bpp — good web release
+        # Below a web release the grain is half compression artefact: it is replaced
+        # rather than coded, which is what lets the raised CRF stand.
+        (3_000_000, 1.5, 28.5, "1"),  # 0.060 bpp — modestly compressed
+        (1_500_000, 2.5, 29.5, "1"),  # 0.030 bpp — heavily compressed
     ],
 )
-def test_a_weaker_source_raises_the_crf(bitrate: int, delta: float) -> None:
+def test_a_weaker_source_raises_the_crf(
+    bitrate: int, delta: float, crf: float, denoise: str
+) -> None:
     svt, _ = plans(source=media(video=video_track(bitrate_bps=bitrate)))
 
     applied = next((a.delta for a in svt.adjustments if a.label == "source quality"), 0.0)
     assert applied == delta
-    assert svt.crf == 27.0 + delta
+    assert svt.crf == crf
+    assert svt.params["film-grain-denoise"] == denoise
 
 
 def test_a_disc_grade_source_is_explained_rather_than_adjusted() -> None:
@@ -170,8 +177,11 @@ def test_hdr_earns_a_crf_point_on_both_plans() -> None:
     advice = build_advice(request_for(source=parse_source(fixture("ffprobe_uhd_hdr.json")).media))
     svt, x265 = advice.plans
 
-    # 2160p anchors 32 and 23, each less 1 for grain and 1 for HDR.
-    assert svt.crf == 30.0
+    # 2160p anchors 32 and 23, each less 1 for grain and 1 for HDR. SVT-AV1's 30 is then
+    # pulled to the ceiling for coded grain — this 35 mm negative's own grain is being
+    # coded, and CRF 30 has no budget to carry it — but the HDR point is still what took
+    # it there rather than to 31.
+    assert svt.crf == 27.0
     assert x265.crf == 21.0
     for plan in (svt, x265):
         assert next(a for a in plan.adjustments if a.label == "HDR").delta == -1.0
@@ -501,6 +511,82 @@ def test_a_bit_depth_override_is_applied_to_the_source() -> None:
     assert request.source.video.bit_depth == 10
 
 
+# --- grain and the CRF are one decision -------------------------------------
+
+
+def test_a_4k_negative_is_not_asked_to_code_grain_it_cannot_afford() -> None:
+    """The bug this coupling exists for: denoise=0 paired with a CRF that starves it."""
+    uhd = media(video=video_track(width=3840, height=2160))
+    svt, _ = plans(source=uhd, grain_override=GrainLevel.MODERATE)
+
+    # 32 for 2160p, less 1 for grain, plus a half point for the source — 31.5, which is
+    # four and a half points above what coded grain can be carried at.
+    assert svt.crf == 27.0
+    assert (svt.params["film-grain"], svt.params["film-grain-denoise"]) == ("8", "0")
+    step = next(a for a in svt.adjustments if a.label == "real grain ceiling")
+    assert step.delta == -4.5
+    assert sum(a.delta for a in svt.adjustments) == svt.crf
+    assert any("break up into blocks" in reason for reason in svt.rationale)
+
+
+def test_a_compact_target_replaces_the_grain_rather_than_finding_the_bitrate() -> None:
+    """The other way out of the same corner: keep the CRF, give up the real grain."""
+    uhd = media(video=video_track(width=3840, height=2160))
+    svt, _ = plans(source=uhd, grain_override=GrainLevel.MODERATE, size=SizePreference.COMPACT)
+
+    assert svt.crf == 33.5
+    # A replacement field carries the whole look, so it is stronger than the floor an
+    # unclamped plan would have used — and still short of what heavy grain asks for.
+    assert (svt.params["film-grain"], svt.params["film-grain-denoise"]) == ("10", "1")
+    assert not any(a.label == "real grain ceiling" for a in svt.adjustments)
+    # Nothing left in the picture for the Wiener filter to eat, so it goes back on.
+    assert "enable-restoration" not in svt.params
+    assert any("compact target asks for the smaller file" in r for r in svt.rationale)
+
+
+def test_a_thin_source_has_its_grain_replaced_rather_than_the_crf_clamped() -> None:
+    """At 0.06 bpp what is left of the grain is half compression artefact already."""
+    svt, _ = plans(
+        source=media(video=video_track(bitrate_bps=3_000_000)), grain_override=GrainLevel.MODERATE
+    )
+
+    assert svt.crf == 28.5
+    assert (svt.params["film-grain"], svt.params["film-grain-denoise"]) == ("10", "1")
+    assert any("half compression artefact" in reason for reason in svt.rationale)
+
+
+def test_finer_grain_is_carried_a_little_further_up_the_scale() -> None:
+    """A large-format negative's tight grain is cheaper to code than 35 mm's."""
+    uhd = media(video=video_track(width=3840, height=2160))
+    light, _ = plans(source=uhd, grain_override=GrainLevel.LIGHT)
+    moderate, _ = plans(source=uhd, grain_override=GrainLevel.MODERATE)
+
+    assert light.crf == 29.0
+    assert moderate.crf == 27.0
+    assert light.params["film-grain-denoise"] == "0"
+
+
+def test_the_ceiling_leaves_a_plan_that_was_already_under_it_alone() -> None:
+    svt, _ = plans(grain_override=GrainLevel.MODERATE)
+
+    assert svt.crf == 27.0
+    assert not any(a.label == "real grain ceiling" for a in svt.adjustments)
+
+
+def test_grain_that_is_replaced_anyway_is_never_clamped() -> None:
+    """Heavy and extreme denoise from the start, so the ceiling has no business there."""
+    uhd = media(video=video_track(width=3840, height=2160))
+    heavy, _ = plans(source=uhd, grain_override=GrainLevel.HEAVY)
+    digital, _ = plans(
+        source=uhd, specs=specs(negative_formats=["Digital"], cinematographic_processes=[])
+    )
+
+    assert heavy.crf == 31.5
+    assert digital.crf == 33.5
+    for plan in (heavy, digital):
+        assert not any(a.label == "real grain ceiling" for a in plan.adjustments)
+
+
 # --- estimates --------------------------------------------------------------
 
 
@@ -521,6 +607,19 @@ def test_grain_synthesis_lowers_the_estimate() -> None:
     )
     assert coded is not None and synthesised is not None
     assert synthesised < coded
+
+
+def test_a_synthesised_plan_is_estimated_as_the_grainless_picture_it_codes() -> None:
+    """The saving is the point of choosing to re-synthesise, so it is shown in full."""
+    grainless = estimate_bitrate(
+        Encoder.SVT_AV1, 27, video_track(), GrainLevel.NONE, synthesised=False
+    )
+    assert grainless is not None
+    for level in (GrainLevel.MODERATE, GrainLevel.HEAVY, GrainLevel.EXTREME):
+        assert (
+            estimate_bitrate(Encoder.SVT_AV1, 27, video_track(), level, synthesised=True)
+            == grainless
+        )
 
 
 def test_a_higher_crf_estimates_a_smaller_file() -> None:

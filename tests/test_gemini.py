@@ -17,8 +17,7 @@ from typing import Any
 import httpx2
 import pytest
 
-from app.advice.rules import build_advice
-from app.advice.validate import MAX_CRF_DRIFT
+from app.advice.rules import REAL_GRAIN_CRF_CEILING, build_advice
 from app.models import (
     Advice,
     AdviceSource,
@@ -144,9 +143,13 @@ def test_the_context_carries_the_film_and_the_baseline() -> None:
     assert context["grain_estimate"]["set_by_user"] is False
     assert context["imdb_technical"]["negative_formats"] == ["35 mm"]
     assert context["preferences"] == {"speed": "balanced", "size": "balanced"}
-    assert [plan["encoder"] for plan in context["baseline_plans"]] == ["svt-av1", "x265"]
-    assert context["baseline_plans"][0]["crf"] == advice.plans[0].crf
-    assert context["baseline_plans"][0]["params"] == advice.plans[0].params
+    proposal = context["proposal"]
+    assert [plan["encoder"] for plan in proposal["plans"]] == ["svt-av1", "x265"]
+    assert proposal["plans"][0]["crf"] == advice.plans[0].crf
+    assert proposal["plans"][0]["params"] == advice.plans[0].params
+    # Named a proposal, and carrying the one number the model is asked to reason with.
+    assert "has not read this film" in proposal["made_by"]
+    assert proposal["svt_av1_real_grain_crf_ceiling"] == REAL_GRAIN_CRF_CEILING
 
 
 def test_the_context_describes_the_source_file() -> None:
@@ -231,7 +234,8 @@ def test_the_response_schema_avoids_what_gemini_rejects() -> None:
 def test_the_system_prompt_states_the_limits_it_will_be_held_to() -> None:
     # Anything the validator silently enforces should be in the prompt too, or the
     # model spends its output on suggestions that get thrown away.
-    assert f"within {MAX_CRF_DRIFT:g} points" in SYSTEM_PROMPT
+    assert "There is no limit on how far you may move it" in SYSTEM_PROMPT
+    assert "10-55 for SVT-AV1" in SYSTEM_PROMPT  # the CRF range that is still enforced
     assert "slower" in SYSTEM_PROMPT  # the x265 preset ladder
     assert "film-grain" in SYSTEM_PROMPT  # the SVT-AV1 parameter allowlist
     assert "will be overwritten with the file's own values" in SYSTEM_PROMPT
@@ -329,16 +333,78 @@ def test_an_unchanged_crf_adds_no_adjustment() -> None:
     assert not any(step.label == "Gemini" for step in reviewed.plans[0].adjustments)
 
 
-def test_a_crf_beyond_the_drift_limit_is_clamped_and_declared() -> None:
+def test_a_crf_far_from_the_proposal_is_kept_and_shown_as_the_models_own() -> None:
+    """The model has read the film; the proposal came from a table. It gets to disagree."""
     advice, request = baseline()
     payload = model_payload(
-        plans=[{"encoder": "x265", "crf": 34.0, "preset": "slow", "rationale": []}]
+        plans=[{"encoder": "x265", "crf": 15.0, "preset": "slow", "rationale": []}]
     )
 
     reviewed = merge_advice(advice, payload, request)
 
-    assert reviewed.plans[1].crf == advice.plans[1].crf + MAX_CRF_DRIFT
-    assert any("pulled back" in flag for flag in reviewed.rejected_flags)
+    assert reviewed.plans[1].crf == 15.0
+    assert reviewed.rejected_flags == []
+    step = next(step for step in reviewed.plans[1].adjustments if step.label == "Gemini")
+    assert step.delta == round(15.0 - advice.plans[1].crf, 1)
+
+
+def test_a_crf_the_encoder_would_refuse_is_still_clamped() -> None:
+    advice, request = baseline()
+    payload = model_payload(plans=[{"encoder": "x265", "crf": 99.0, "preset": "slow"}])
+
+    reviewed = merge_advice(advice, payload, request)
+
+    assert reviewed.plans[1].crf == 40.0
+    assert any("clamped to 40" in flag for flag in reviewed.rejected_flags)
+
+
+def test_a_plan_that_starves_its_own_grain_is_reported_and_left_standing() -> None:
+    """The coherence check reports; it does not rewrite. The model may have a reason."""
+    advice, request = baseline()
+    payload = model_payload(plans=[{"encoder": "svt-av1", "crf": 31.0, "preset": "4"}])
+
+    reviewed = merge_advice(advice, payload, request)
+
+    plan = reviewed.plans[0]
+    # Untouched: the CRF the model asked for, over the baseline's film-grain-denoise=0.
+    assert plan.crf == 31.0
+    assert plan.params["film-grain-denoise"] == "0"
+    complaint = reviewed.warnings[-1]
+    assert "film-grain-denoise=0" in complaint
+    assert f"above the {REAL_GRAIN_CRF_CEILING:g}" in complaint
+    assert "why this film is an exception" in complaint
+
+
+def test_a_high_crf_over_replaced_grain_is_coherent_and_says_nothing() -> None:
+    advice, request = baseline()
+    payload = model_payload(
+        plans=[
+            {
+                "encoder": "svt-av1",
+                "crf": 33.0,
+                "preset": "4",
+                "params": [
+                    {"name": "film-grain-denoise", "value": "1"},
+                    {"name": "film-grain", "value": "10"},
+                ],
+            }
+        ]
+    )
+
+    reviewed = merge_advice(advice, payload, request)
+
+    assert reviewed.plans[0].crf == 33.0
+    assert reviewed.warnings == advice.warnings
+
+
+def test_coded_grain_under_the_ceiling_says_nothing_either() -> None:
+    advice, request = baseline()
+    payload = model_payload(plans=[{"encoder": "svt-av1", "crf": 26.0, "preset": "4"}])
+
+    reviewed = merge_advice(advice, payload, request)
+
+    assert reviewed.plans[0].params["film-grain-denoise"] == "0"
+    assert reviewed.warnings == advice.warnings
 
 
 def test_the_sources_own_colour_metadata_always_wins() -> None:

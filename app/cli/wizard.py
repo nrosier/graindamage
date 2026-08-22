@@ -626,10 +626,10 @@ class Wizard:
                 rows.append(
                     Choice(
                         value=Encode.REVIEW,
-                        label=_pad("Gemini review"),
-                        detail="on — it may move the CRF, and writes the prose"
+                        label=_pad("Gemini"),
+                        detail="deciding — the rules below are its proposal"
                         if answers.review
-                        else "off — the deterministic plan, untouched",
+                        else "off — the rules engine's plan, unreviewed",
                     )
                 )
             rows.append(Choice(value=Encode.STOP, label=_pad("Stop, and write nothing")))
@@ -725,17 +725,17 @@ class Wizard:
                     )
                 case Encode.REVIEW:
                     answers.review = self._setting(
-                        "Let Gemini review the plan?",
+                        "Let Gemini decide the settings?",
                         [
                             Choice(
                                 value=True,
                                 label="yes",
-                                detail="it may move CRF, preset, tune and params — all validated",
+                                detail="it reads the film and the rules' proposal, then decides",
                             ),
                             Choice(
                                 value=False,
                                 label="no",
-                                detail="the deterministic plan and nothing else",
+                                detail="the rules engine's tables and nothing else",
                             ),
                         ],
                         answers.review,
@@ -785,7 +785,7 @@ class Wizard:
                 f"{answers.size.value} size",
                 f"{answers.speed.value} speed",
                 f"{self._first_encoder().label} first",
-                f"Gemini review {'on' if answers.review else 'off'}"
+                f"Gemini {'deciding' if answers.review else 'off'}"
                 if self._gemini
                 else "no Gemini",
             ]

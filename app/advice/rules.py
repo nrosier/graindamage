@@ -95,6 +95,27 @@ _FILM_GRAIN: dict[GrainLevel, _Synthesis] = {
     GrainLevel.EXTREME: _Synthesis(20, denoise=True),
 }
 
+# The highest CRF at which coding the real grain is still worth attempting. Above it the
+# encoder has been told to keep every grain particle and then given no bits to do it
+# with: real grain is high-frequency spatial noise, the bit budget runs out, and what
+# was meant to be grain becomes swirling blocks in motion. So the denoiser and the CRF
+# are one decision. A plan that codes real grain is capped here; a plan that wants a
+# higher CRF has to denoise and re-synthesise instead.
+REAL_GRAIN_CRF_CEILING = 27.0
+
+# Finer grain is cheaper to code, so a large-format negative's tight grain holds together
+# a little further up the scale than 35 mm's does. Heavy and extreme never reach this
+# table: at those levels the grain is replaced rather than coded.
+_CEILING_BONUS: dict[GrainLevel, float] = {GrainLevel.LIGHT: 2.0}
+
+# What the strength becomes when a level that would have coded its own grain flips to
+# replacing it: a replacement field carries the whole look, where a floor only fills in
+# what the quantiser flattened. Monotone with the levels that already replace (12, 20).
+_REPLACEMENT_STRENGTH: dict[GrainLevel, int] = {
+    GrainLevel.LIGHT: 6,
+    GrainLevel.MODERATE: 10,
+}
+
 # Stocks got finer, and dupe negatives and optical printing got rarer. A pre-1970
 # negative carries coarser, higher-contrast grain than a late-1990s one of the same
 # format, so the same "35 mm" row means more grain to protect.
@@ -249,8 +270,11 @@ def estimate_bitrate(
 
     factor = _GRAIN_BITRATE_FACTOR[grain]
     if synthesised:
-        # A denoised signal plus synthesis parameters costs far less than coded grain.
-        factor = min(factor, 1.2)
+        # The picture being coded has had its grain taken out, so it costs about what a
+        # grainless one costs; the grain comes back as a handful of synthesis
+        # parameters. Modelling it any dearer than that hides the saving, which is the
+        # whole reason for choosing to re-synthesise.
+        factor = _GRAIN_BITRATE_FACTOR[GrainLevel.NONE]
     return int(bpp * factor * video.pixels * frame_rate)
 
 
@@ -393,6 +417,54 @@ def _svt_av1_plan(request: EncodeRequest, grain: GrainProfile) -> EncoderPlan:
     }
 
     synthesis = _FILM_GRAIN.get(grain.level) if grain.is_photochemical else None
+
+    ceiling = REAL_GRAIN_CRF_CEILING + _CEILING_BONUS.get(grain.level, 0.0)
+
+    if synthesis is not None and not synthesis.denoise and crf > ceiling:
+        # Coding the real grain and then starving it are two halves of one mistake, and
+        # this is where the two decisions meet. Which way out to take depends on whether
+        # this film's own grain is worth the bitrate: a compact target says the smaller
+        # file matters more, and a source whose detail is already limited has grain that
+        # is half compression artefact anyway. Either way it is better replaced than
+        # faithfully coded. Otherwise the grain is the point, and the bitrate is found.
+        thin_source = quality_delta >= 1.5
+        if request.size is SizePreference.COMPACT or thin_source:
+            synthesis = _Synthesis(
+                _REPLACEMENT_STRENGTH.get(grain.level, synthesis.strength), denoise=True
+            )
+            because = (
+                "this source's own detail is already limited, so what is left of its "
+                "grain is half compression artefact"
+                if thin_source
+                else "a compact target asks for the smaller file"
+            )
+            rationale.append(
+                f"CRF {crf:g} is too high to code this film's own grain, and {because} — "
+                "so the denoiser goes on and the grain is re-synthesised at playback "
+                "instead. That keeps the CRF, at the cost of a uniform grain field in "
+                "place of this negative's own."
+            )
+        else:
+            adjustments.append(
+                Adjustment(
+                    label="real grain ceiling",
+                    delta=ceiling - crf,
+                    detail=(
+                        f"Coded grain needs the bitrate to carry it; above CRF "
+                        f"{ceiling:g} it breaks up in motion instead."
+                    ),
+                )
+            )
+            rationale.append(
+                f"CRF {ceiling:g} rather than {crf:g}: this film's own "
+                "grain is being coded rather than replaced, and grain is high-frequency "
+                "noise that a higher CRF cannot afford — it would break up into blocks "
+                "in motion. The file is larger for it. Ask for a compact target instead "
+                "and the grain is denoised and re-synthesised, which is the other way to "
+                "spend less."
+            )
+            crf = ceiling
+
     coarse = synthesis is not None and _is_coarse_stock(request, grain)
 
     if synthesis is not None:
@@ -414,8 +486,10 @@ def _svt_av1_plan(request: EncodeRequest, grain: GrainProfile) -> EncoderPlan:
                 "grain, codes the clean image, and re-synthesises grain at playback. On a "
                 "negative this coarse that is the single largest saving available. The "
                 "grain it puts back is uniform, though, so if this film's grain varies by "
-                "shot — a blow-up, a mixed-format shoot — set film-grain-denoise=0 and "
-                f"drop film-grain to about {max(2, strength // 3)} instead."
+                "shot — a blow-up, a mixed-format shoot — set film-grain-denoise=0, drop "
+                f"film-grain to about {max(2, strength // 3)}, and bring the CRF down to "
+                f"{REAL_GRAIN_CRF_CEILING:g} or below, because grain that is coded rather "
+                "than replaced has to be paid for."
             )
         else:
             rationale.append(
