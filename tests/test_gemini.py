@@ -932,6 +932,70 @@ def test_a_model_without_grounding_is_asked_again_without_it() -> None:
     assert not lookup.grounded
 
 
+def test_a_spent_grounding_quota_is_asked_again_without_the_search() -> None:
+    """The 429 that only ever hits the lookup: grounding is metered on its own.
+
+    A key with plenty of ordinary generateContent left — the plan review goes through
+    fine — can still be out of search requests, and rows from recall beat no rows.
+    """
+    seen: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        if b"google_search" in request.content:
+            return httpx2.Response(429, json={"error": {"message": "quota exceeded"}})
+        return httpx2.Response(200, json=envelope(SPECS_ANSWER))
+
+    lookup = run(gemini(handler).technical_specs("tt0083658"))
+
+    assert len(seen) == 2
+    assert "tools" not in json.loads(seen[1].content)
+    assert lookup.specs.negative_formats == ["35 mm"]
+    assert not lookup.grounded
+    assert "recalled from training data" in lookup.caveat
+
+
+def test_a_rate_limit_with_grounding_already_off_is_not_retried() -> None:
+    handler, seen = recording_handler(httpx2.Response(429, json={"error": {}}))
+
+    with pytest.raises(ProviderUnavailable, match="rate limit reached"):
+        run(gemini(handler, gemini_web_grounding=False).technical_specs("tt0083658"))
+
+    assert len(seen) == 1
+
+
+def test_the_quota_that_ran_out_is_named_when_gemini_names_it() -> None:
+    """ "Rate limit reached" alone reads as though the whole key were spent."""
+    body = {
+        "error": {
+            "message": "You exceeded your current quota.",
+            "details": [
+                {
+                    "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                    "violations": [{"quotaId": "GroundingRequestsPerDayPerProject-FreeTier"}],
+                }
+            ],
+        }
+    }
+    handler, _ = recording_handler(httpx2.Response(429, json=body))
+
+    with pytest.raises(ProviderUnavailable) as raised:
+        run(gemini(handler, gemini_web_grounding=False).technical_specs("tt0083658"))
+
+    assert raised.value.detail == "GroundingRequestsPerDayPerProject-FreeTier"
+
+
+def test_a_quota_with_no_violations_falls_back_to_the_message() -> None:
+    handler, _ = recording_handler(
+        httpx2.Response(429, json={"error": {"message": "Too many requests."}})
+    )
+
+    with pytest.raises(ProviderUnavailable) as raised:
+        run(gemini(handler, gemini_web_grounding=False).technical_specs("tt0083658"))
+
+    assert raised.value.detail == "Too many requests."
+
+
 def test_a_refusal_that_is_not_about_grounding_is_only_tried_twice() -> None:
     handler, seen = recording_handler(httpx2.Response(400, json={"error": {}}))
 

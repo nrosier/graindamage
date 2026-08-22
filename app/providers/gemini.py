@@ -81,7 +81,12 @@ from app.models import (
     SpecsSource,
     TechnicalSpecs,
 )
-from app.providers import ProviderDisabled, ProviderRejected, ProviderUnavailable
+from app.providers import (
+    ProviderDisabled,
+    ProviderRateLimited,
+    ProviderRejected,
+    ProviderUnavailable,
+)
 from app.providers.imdb import SPEC_LABELS, specs_from_rows
 
 # --- limits on what the model can put on the page ---------------------------
@@ -424,11 +429,15 @@ class GeminiClient:
         grounded = self._settings.gemini_web_grounding
         try:
             payload = await self._specs_payload(imdb_id, title, year, grounded=grounded)
-        except ProviderRejected:
+        except (ProviderRejected, ProviderRateLimited):
             if not grounded:
                 raise
-            # Search grounding is a per-model feature. If this model has not got it,
-            # the answer is worth less but is still worth having.
+            # Both refusals are about the search tool rather than the question, and both
+            # are answered the same way: ask again without it. A model may simply not
+            # have grounding; or it has it and the grounding quota — which is metered
+            # separately from, and far more tightly than, plain generateContent — is
+            # spent. Recalled rows are worth less than searched ones, and the lookup
+            # says so, but they are worth much more than a 429.
             grounded = False
             payload = await self._specs_payload(imdb_id, title, year, grounded=False)
 
@@ -547,7 +556,10 @@ class GeminiClient:
                 f"Gemini has no model named {self._settings.gemini_model} (404)."
             )
         if response.status_code == 429:
-            raise ProviderUnavailable("Gemini rate limit reached — try again shortly (429).")
+            raise ProviderRateLimited(
+                "Gemini rate limit reached — try again shortly (429).",
+                detail=_quota_detail(response),
+            )
         if response.status_code >= 400:
             raise ProviderUnavailable(f"Gemini returned HTTP {response.status_code}.")
 
@@ -557,6 +569,26 @@ class GeminiClient:
             raise ProviderUnavailable("Gemini returned a response that was not JSON.") from exc
 
         return _extract_payload(_as_dict(envelope), lenient=schema is None)
+
+
+def _quota_detail(response: httpx2.Response) -> str | None:
+    """Which allowance ran out, if the 429 body says.
+
+    Worth digging out because Gemini meters its features separately: a key with plenty
+    of ``generateContent`` left can still be out of search-grounding requests, and
+    "rate limit reached" on its own reads as though the whole key were spent.
+    """
+    try:
+        error = _as_dict(_as_dict(response.json()).get("error"))
+    except ValueError:
+        return None
+
+    for detail in _as_list(error.get("details")):
+        for violation in _as_list(_as_dict(detail).get("violations")):
+            named = _as_dict(violation)
+            if (quota := _prose(named.get("quotaId") or named.get("quotaMetric"))) is not None:
+                return quota
+    return _prose(error.get("message"))
 
 
 def _extract_payload(envelope: dict[str, Any], *, lenient: bool = False) -> dict[str, Any]:

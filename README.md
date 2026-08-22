@@ -186,8 +186,11 @@ button needs `GEMINI_API_KEY`; there is nothing else to configure and nothing to
 `GEMINI_WEB_GROUNDING` (on by default) lets the model search the web for the page
 rather than answer from training data. Google's API does not allow search and a
 response schema on the same request, so a grounded look-up asks for JSON in words and
-is parsed leniently; if the model or the key refuses the tool (HTTP 400), the app
-retries once without it, schema-constrained. Turning grounding off makes that the only
+is parsed leniently; if the model or the key refuses the tool (HTTP 400) **or is out of
+search requests (HTTP 429)**, the app retries once without it, schema-constrained — the
+grounding quota is metered separately from, and far more tightly than, ordinary
+generation, so a key that can still review a plan is often out of searches long before
+it. Recalled rows say so on the page. Turning grounding off makes that the only
 path.
 
 ### Paste them

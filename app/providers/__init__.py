@@ -34,4 +34,21 @@ class ProviderRejected(ProviderUnavailable):
     """
 
 
-__all__ = ["ProviderDisabled", "ProviderError", "ProviderRejected", "ProviderUnavailable"]
+class ProviderRateLimited(ProviderUnavailable):
+    """The request was refused for quota, not for content.
+
+    Separate from :class:`ProviderRejected` because the two are retryable in opposite
+    ways: a rejection means *this request* is wrong and will stay wrong, while a rate
+    limit means this request was fine and something else was over its allowance. That
+    matters when the allowance belongs to one optional part of the call — a metered
+    tool, say — because the same request without that part draws on a different one.
+    """
+
+
+__all__ = [
+    "ProviderDisabled",
+    "ProviderError",
+    "ProviderRateLimited",
+    "ProviderRejected",
+    "ProviderUnavailable",
+]
