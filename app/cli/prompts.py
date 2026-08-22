@@ -58,16 +58,22 @@ class Choice[T]:
     detail: str | None = None
 
 
-def run_menu(count: int, keys: Iterable[str], *, draw: Callable[[int], None]) -> int | None:
+def run_menu(
+    count: int, keys: Iterable[str], *, draw: Callable[[int], None], start: int = 0
+) -> int | None:
     """Move a cursor over ``count`` rows. Returns the chosen index, or ``None`` to abort.
 
     The wrap-around is deliberate: with *Abort* as the last row, one press of ↑ from the
     top is the fastest way out.
+
+    ``start`` is where the cursor begins — the film the filename agrees with, or a
+    setting's current value — so that Enter on its own is the answer the caller expects.
+    An out-of-range start is the first row, never a crash.
     """
     if count <= 0:
         return None
 
-    index = 0
+    index = start if 0 <= start < count else 0
     draw(index)
     for key in keys:
         if key == UP:
@@ -153,16 +159,18 @@ class Terminal:
 
     # --- prompts -----------------------------------------------------------
 
-    def select[T](self, prompt: str, choices: Sequence[Choice[T]]) -> Choice[T] | None:
+    def select[T](
+        self, prompt: str, choices: Sequence[Choice[T]], *, start: int = 0
+    ) -> Choice[T] | None:
         """Offer ``choices``. Returns the chosen one, or ``None`` if the user aborted."""
         if not choices:
             return None
         self.write()
         self.write(prompt)
         index = (
-            self._select_interactively(choices)
+            self._select_interactively(choices, start)
             if self.interactive
-            else self._select_by_number(choices)
+            else self._select_by_number(choices, start)
         )
         return choices[index] if index is not None else None
 
@@ -183,7 +191,7 @@ class Terminal:
 
     # --- the two ways to choose -------------------------------------------
 
-    def _select_interactively[T](self, choices: Sequence[Choice[T]]) -> int | None:
+    def _select_interactively[T](self, choices: Sequence[Choice[T]], start: int) -> int | None:
         fd = self._stdin.fileno()
         saved = termios.tcgetattr(fd)
         draw = self._painter(choices)
@@ -191,7 +199,7 @@ class Terminal:
             tty.setcbreak(fd)
             keys = decode_keys(lambda n: os.read(fd, n), waiting=lambda: _input_waiting(fd))
             try:
-                return run_menu(len(choices), keys, draw=draw)
+                return run_menu(len(choices), keys, draw=draw, start=start)
             except KeyboardInterrupt:
                 return None
         finally:
@@ -220,15 +228,16 @@ class Terminal:
         detail = f"  {choice.detail}" if choice.detail else ""
         return f"{mark}{choice.label}{detail}"
 
-    def _select_by_number[T](self, choices: Sequence[Choice[T]]) -> int | None:
+    def _select_by_number[T](self, choices: Sequence[Choice[T]], start: int) -> int | None:
+        default = start if 0 <= start < len(choices) else 0
         for index, choice in enumerate(choices, start=1):
             detail = f"  {choice.detail}" if choice.detail else ""
             self.write(f"  {index}) {choice.label}{detail}")
 
         for _ in range(_MAX_BAD_ANSWERS):
-            answer = self.ask(f"Choice [1-{len(choices)}, enter for 1]:")
+            answer = self.ask(f"Choice [1-{len(choices)}, enter for {default + 1}]:")
             if not answer:
-                return 0
+                return default
             if answer.isdigit() and 1 <= int(answer) <= len(choices):
                 return int(answer) - 1
             self.write(f"  {answer!r} is not one of them.")

@@ -11,4 +11,13 @@ services:
     environment:
       # Anything set here wins over .env; handy for one-off overrides.
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.7-flash}
+    volumes:
+      # Your films, so the command line inside the container has something to point at:
+      #
+      #   docker compose exec -u "$(id -u):$(id -g)" graindamage /bin/sh
+      #   graindamage /media/Blade.Runner.1982.2160p.mkv
+      #
+      # Set MEDIA_DIR in .env to your library; the default keeps ./media out of the way.
+      # It is read-write on purpose: the two files are written beside the film.
+      - ${MEDIA_DIR:-./media}:/media
     restart: unless-stopped

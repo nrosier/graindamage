@@ -13,6 +13,11 @@ dist/
 # scan reports (gitleaks writes here in CI and locally)
 reports/
 
+# the default media mount: films go here, the directory itself is tracked so that
+# `docker compose up` does not have the daemon create it as root
+/media/*
+!/media/.gitkeep
+
 # tooling caches
 .pytest_cache/
 .mypy_cache/

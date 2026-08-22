@@ -1,19 +1,25 @@
 """The command line: one file in, two files out.
 
-``graindamage /movies/Blade.Runner.1982.2160p.mkv`` reads the title and year out of the
-name, runs ``ffprobe`` on the file, offers the TMDB hits in a list you arrow through,
-looks the IMDb technical rows up through Gemini, and writes a HandBrake preset and an
-FFmpeg script beside the film. The advice is the web app's advice: same rules engine,
-same optional Gemini review, same validation, same wording for the caveats. This module
-only gathers the inputs and lays the answer out.
+``graindamage /media/Blade.Runner.1982.2160p.mkv`` is the whole interface. On a terminal
+it walks you through it — :mod:`app.cli.wizard` asks which film, where the technical rows
+should come from, and what kind of encode, each as a list you move a cursor through. With
+``--yes``, no TTY, or ``--no-menu``, the same run takes its answers from the flags
+instead, which is what a script wants. Either way it reads the title out of the filename,
+runs ``ffprobe`` on the file, and writes a HandBrake preset and an FFmpeg script beside
+the film.
+
+The advice is the web app's advice: same rules engine, same optional Gemini review, same
+validation, same wording for the caveats. This module only decides what goes in and lays
+what comes out down.
 
 Three habits keep it honest:
 
 * **Refuse rather than guess.** A missing file, or a missing ``ffprobe``, exits 2 rather
   than falling back to 1080p defaults — settings for the wrong source are worse than no
   settings at all.
-* **Nothing is overwritten** without ``--force``, and that is checked before any network
-  call, so a re-run says so at once instead of after a Gemini round trip.
+* **Nothing is overwritten** without ``--force``. On the flag path that is a refusal
+  before any network call, so a re-run says so at once rather than after a Gemini round
+  trip; in the menus it is the first question asked, for the same reason.
 * **Prompts and progress go to stderr, the report to stdout**, so
   ``graindamage film.mkv > notes.txt`` still shows you the menu.
 
@@ -24,10 +30,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import re
 import sys
 from collections.abc import Sequence
-from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
@@ -35,10 +39,28 @@ from app import __version__
 from app.advice import finish_advice
 from app.cli.filename import NameGuess, guess_name
 from app.cli.outputs import OutputExists, Written, refuse_existing, write_outputs
-from app.cli.probe import ProbeFailed, Runner, probe
+from app.cli.probe import ProbeFailed, probe
 from app.cli.prompts import Choice, Terminal
 from app.cli.report import render_report
-from app.config import Settings, get_settings
+from app.cli.session import (
+    GUESSED_FROM_YEAR,
+    NO_ROWS_FOUND,
+    NO_TMDB_KEY,
+    NO_VIDEO_TRACK,
+    Abort,
+    Context,
+    FoundSpecs,
+    SetupProblem,
+    best_hit,
+    film_detail,
+    is_imdb_id,
+    make_context,
+    specs_from_file,
+    specs_from_paste,
+    technical_url,
+)
+from app.cli.wizard import Answers, answers_from, choose_input
+from app.cli.wizard import run as run_wizard
 from app.models import (
     Advice,
     Encoder,
@@ -50,11 +72,9 @@ from app.models import (
     SourceReport,
     SpecsSource,
     SpeedPreference,
-    TechnicalSpecs,
 )
 from app.providers import ProviderError
 from app.providers.gemini import GeminiClient
-from app.providers.imdb import parse_technical
 from app.providers.tmdb import TmdbClient
 
 EXIT_OK = 0
@@ -62,69 +82,16 @@ EXIT_ABORTED = 1
 EXIT_SETUP = 2
 EXIT_INTERRUPTED = 130
 
-# A pasted page is a megabyte or so; anything past this is not a technical page.
-MAX_SPECS_CHARS = 4_000_000
-
-_IMDB_ID = re.compile(r"tt\d{5,}")
 _MIN_YEAR, _MAX_YEAR = 1888, 2100
 
-GUESSED_FROM_YEAR = (
-    "Grain was guessed from the release year rather than read from a negative format, "
-    "so treat it as a guess."
-)
-NO_ROWS_FOUND = "Gemini did not have the technical rows for this film."
-NO_TMDB_KEY = (
-    "No TMDB key (TMDB_API_KEY), so the film was not looked up. Settings below come "
-    "from the file alone; pass --imdb-id to get the technical rows anyway."
-)
-NO_VIDEO_TRACK = "ffprobe found no video track, so the resolution and depth are unknown."
+NO_FILE = "Which film? Give me the path to one video file: graindamage /media/film.mkv"
 
 
 class Extra(StrEnum):
-    """The two rows on the film menu that are not films."""
+    """The two rows on the flag path's film menu that are not films."""
 
     RETYPE = "retype"
     ABORT = "abort"
-
-
-class Abort(RuntimeError):
-    """The user chose to stop. Nothing is written."""
-
-
-class SetupProblem(RuntimeError):
-    """Something the run needs is missing, unreadable, or in the way."""
-
-
-@dataclass(slots=True)
-class Context:
-    """Everything the run talks to, so a test can hand it doubles.
-
-    The clients are built once and live for the process, which is what makes their TTL
-    caches worth anything: a retyped search or a second look at the same film costs no
-    upstream request.
-    """
-
-    settings: Settings
-    terminal: Terminal
-    tmdb: TmdbClient
-    gemini: GeminiClient
-    runner: Runner | None = None
-
-
-def make_context(
-    settings: Settings | None = None,
-    *,
-    terminal: Terminal | None = None,
-    runner: Runner | None = None,
-) -> Context:
-    resolved = settings or get_settings()
-    return Context(
-        settings=resolved,
-        terminal=terminal or Terminal(),
-        tmdb=TmdbClient(resolved),
-        gemini=GeminiClient(resolved),
-        runner=runner,
-    )
 
 
 # --- the argument surface ---------------------------------------------------
@@ -135,11 +102,15 @@ def build_parser() -> argparse.ArgumentParser:
         prog="graindamage",
         description="Grain-aware AV1 / x265 settings for one video file.",
         epilog=(
-            "Writes <name>.graindamage.json (a HandBrake preset holding both encoders) "
-            "and <name>.graindamage.sh (the FFmpeg command) beside the file."
+            "With a terminal and no --yes, every step is a menu: arrows move, enter "
+            "chooses, q stops. Writes <name>.graindamage.json (a HandBrake preset "
+            "holding both encoders) and <name>.graindamage.sh (the FFmpeg command) "
+            "beside the file."
         ),
     )
-    parser.add_argument("path", type=Path, help="the video file to advise on")
+    parser.add_argument(
+        "path", type=Path, nargs="?", help="the video file to advise on (asked for if omitted)"
+    )
     parser.add_argument("--version", action="version", version=f"graindamage {__version__}")
 
     film = parser.add_argument_group("the film")
@@ -195,7 +166,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="no Gemini at all: no review and no technical look-up",
     )
     run.add_argument(
-        "-y", "--yes", action="store_true", help="take the best film match without asking"
+        "--no-menu",
+        dest="menu",
+        action="store_false",
+        help="take the answers from these flags rather than asking step by step",
+    )
+    run.add_argument(
+        "-y", "--yes", action="store_true", help="no questions: the best film match, no menus"
     )
     run.add_argument("--ffprobe", default="ffprobe", help="path to ffprobe (default: ffprobe)")
     run.add_argument(
@@ -206,7 +183,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _imdb_arg(value: str) -> str:
     text = value.strip()
-    if not _IMDB_ID.fullmatch(text):
+    if not is_imdb_id(text):
         raise argparse.ArgumentTypeError("an IMDb title id looks like tt0083658")
     return text
 
@@ -239,66 +216,91 @@ def main(argv: Sequence[str] | None = None, *, context: Context | None = None) -
 
 
 async def _run(args: argparse.Namespace, context: Context) -> int:
+    """Gather, advise, write, report. The gathering is the only part with two shapes."""
     terminal = context.terminal
-    path = _resolve_input(args.path)
-    out_dir = (args.outdir or path.parent).expanduser()
+    path = _input_path(args, terminal)
     stem = path.stem
+    menus = _menus_wanted(args, terminal)
 
-    if not args.force:
+    if not (args.force or menus):
         try:
-            refuse_existing(out_dir, stem)
+            refuse_existing((args.outdir or path.parent).expanduser(), stem)
         except OutputExists as exc:
             raise SetupProblem(str(exc)) from exc
 
     report = await _probe(path, args, context)
+    guess = _guess(path, args)
+
     warnings = list(report.warnings)
     if not report.has_video:
         warnings.append(NO_VIDEO_TRACK)
 
-    guess = _guess(path, args)
-    if not args.quiet:
-        terminal.write(f"File     {path.name}")
-        terminal.write(f"Film     {guess.describe()}")
-
-    movie, movie_warning = await _find_movie(context, guess, assume_yes=args.yes)
-    if movie_warning:
-        warnings.append(movie_warning)
-
-    imdb_id = args.imdb_id or (movie.imdb_id if movie else None)
-    found = await _find_specs(context, args, imdb_id=imdb_id, movie=movie)
-    warnings.extend(found.warnings)
-
-    request = EncodeRequest(
-        movie=movie,
-        specs=found.specs,
-        specs_source=found.source,
-        source=report.media,
-        source_tool=report.tool,
-        grain_override=GrainLevel(args.grain) if args.grain else None,
-        bit_depth_override=args.bit_depth,
-        speed=SpeedPreference(args.speed),
-        size=SizePreference(args.size),
-        input_path=path.name,
-        output_stem=stem,
-        fallback_year=guess.year,
+    answers = answers_from(
+        args, out_dir=(args.outdir or path.parent).expanduser(), found=_given(args)
     )
+    answers.source_warnings = tuple(warnings)
+    answers.review = bool(args.gemini and context.gemini.enabled)
 
+    if menus:
+        answers = await run_wizard(
+            context, answers, path=path, report=report, guess=guess, gemini=args.gemini
+        )
+    else:
+        if not args.quiet:
+            terminal.write(f"File     {path.name}")
+            terminal.write(f"Film     {guess.describe()}")
+        await _gather(args, context, answers, guess=guess)
+
+    request = _request(answers, path=path, report=report, guess=guess)
+    if answers.review and not args.quiet:
+        terminal.write("Asking Gemini to review the plan…")
     advice = await finish_advice(
         request,
-        annotator=context.gemini if args.gemini and context.gemini.enabled else None,
-        warnings=warnings,
+        annotator=context.gemini if answers.review else None,
+        warnings=answers.warnings,
     )
-    if args.encoder:
-        _prefer(advice, Encoder(args.encoder))
+    if answers.encoder:
+        _prefer(advice, answers.encoder)
 
-    written = _write(
-        advice, request, stem=stem, out_dir=out_dir, media_dir=path.parent, found=found, movie=movie
-    )
-    _report(advice, request, movie=movie, found=found, written=written, quiet=args.quiet)
+    written = _write(advice, request, answers, media_dir=path.parent)
+    _report(advice, request, answers, written=written, quiet=args.quiet)
     return EXIT_OK
 
 
+def _menus_wanted(args: argparse.Namespace, terminal: Terminal) -> bool:
+    """Whether to walk the steps. ``--yes`` and ``--quiet`` both mean *do not ask me*."""
+    return bool(args.menu and terminal.interactive and not (args.yes or args.quiet))
+
+
+def _request(
+    answers: Answers, *, path: Path, report: SourceReport, guess: NameGuess
+) -> EncodeRequest:
+    return EncodeRequest(
+        movie=answers.movie,
+        specs=answers.found.specs,
+        specs_source=answers.found.source,
+        source=report.media,
+        source_tool=report.tool,
+        grain_override=answers.grain,
+        bit_depth_override=answers.bit_depth,
+        speed=answers.speed,
+        size=answers.size,
+        input_path=path.name,
+        output_stem=path.stem,
+        fallback_year=guess.year,
+    )
+
+
 # --- the file ---------------------------------------------------------------
+
+
+def _input_path(args: argparse.Namespace, terminal: Terminal) -> Path:
+    """The file to advise on: the argument, or a menu of what is lying about."""
+    if args.path is not None:
+        return _resolve_input(args.path)
+    if not terminal.interactive:
+        raise SetupProblem(NO_FILE)
+    return _resolve_input(choose_input(terminal))
 
 
 def _resolve_input(raw: Path) -> Path:
@@ -329,6 +331,34 @@ def _guess(path: Path, args: argparse.Namespace) -> NameGuess:
     return guessed
 
 
+# --- gathering from the flags ----------------------------------------------
+
+
+async def _gather(
+    args: argparse.Namespace, context: Context, answers: Answers, *, guess: NameGuess
+) -> None:
+    """The flag path: one search, one details request, one look-up, no review screen."""
+    movie, warning = await _find_movie(context, guess, assume_yes=args.yes)
+    answers.movie = movie
+    answers.film_warning = warning
+    answers.imdb_id = args.imdb_id or (movie.imdb_id if movie else None)
+
+    if args.specs is None:
+        answers.found = await _find_specs(
+            args, context, imdb_id=answers.imdb_id, movie=answers.movie
+        )
+
+
+def _given(args: argparse.Namespace) -> FoundSpecs:
+    """``--specs FILE``, read before anything is asked. It wins over every look-up."""
+    if args.specs is None:
+        return FoundSpecs()
+    try:
+        return specs_from_file(args.specs)
+    except SetupProblem as exc:
+        raise SetupProblem(f"--specs {exc}") from exc
+
+
 # --- the film ---------------------------------------------------------------
 
 
@@ -354,7 +384,7 @@ async def _find_movie(
         if assume_yes:
             if not hits:
                 return None, f'Nothing on TMDB for "{query}". Continuing without the film.'
-            return await _details(tmdb, _best(hits, guess.year))
+            return await _details(tmdb, best_hit(hits, guess.year))
 
         if not hits:
             context.terminal.write(f'Nothing on TMDB for "{query}".')
@@ -371,24 +401,12 @@ async def _find_movie(
 
 
 def _film_choices(hits: Sequence[MovieHit], year: int | None) -> list[Choice[MovieHit | Extra]]:
-    rows: list[Choice[MovieHit | Extra]] = []
-    for hit in hits:
-        detail = str(hit.year) if hit.year else "year unknown"
-        if year and hit.year == year:
-            detail = f"{detail}  · matches the filename"
-        rows.append(Choice(value=hit, label=hit.display_title, detail=detail))
+    rows: list[Choice[MovieHit | Extra]] = [
+        Choice(value=hit, label=hit.display_title, detail=film_detail(hit, year)) for hit in hits
+    ]
     rows.append(Choice(value=Extra.RETYPE, label="Wrong film — let me type the title"))
     rows.append(Choice(value=Extra.ABORT, label="Stop, and write nothing"))
     return rows
-
-
-def _best(hits: Sequence[MovieHit], year: int | None) -> MovieHit:
-    """The hit the filename's year agrees with, or TMDB's own first answer."""
-    if year is not None:
-        matching = next((hit for hit in hits if hit.year == year), None)
-        if matching is not None:
-            return matching
-    return hits[0]
 
 
 async def _details(tmdb: TmdbClient, hit: MovieHit) -> tuple[Movie | None, str | None]:
@@ -408,26 +426,13 @@ def _ask_title(terminal: Terminal) -> str:
 # --- the technical rows ----------------------------------------------------
 
 
-@dataclass(frozen=True, slots=True)
-class FoundSpecs:
-    """The technical rows, where they came from, and what to say about it."""
-
-    specs: TechnicalSpecs
-    source: SpecsSource | None = None
-    caveat: str | None = None
-    warnings: tuple[str, ...] = ()
-
-
 async def _find_specs(
-    context: Context, args: argparse.Namespace, *, imdb_id: str | None, movie: Movie | None
+    args: argparse.Namespace, context: Context, *, imdb_id: str | None, movie: Movie | None
 ) -> FoundSpecs:
-    """A paste always wins; otherwise ask Gemini, and offer a paste if it does not know."""
-    if args.specs is not None:
-        return _specs_from_file(args.specs)
-
+    """Ask Gemini, and offer a paste if it does not know. No id or no key: say why."""
     gemini = context.gemini
     if not (imdb_id and args.gemini and gemini.enabled):
-        return FoundSpecs(TechnicalSpecs(), warnings=(_why_no_lookup(args, imdb_id, gemini),))
+        return FoundSpecs(warnings=(_why_no_lookup(args, imdb_id, gemini),))
 
     try:
         lookup = await gemini.technical_specs(
@@ -436,41 +441,23 @@ async def _find_specs(
             year=movie.year if movie else None,
         )
     except ProviderError as exc:
-        return FoundSpecs(TechnicalSpecs(), warnings=(f"{exc.message} {GUESSED_FROM_YEAR}",))
+        return FoundSpecs(warnings=(f"{exc.message} {GUESSED_FROM_YEAR}",))
 
     if not lookup.specs.is_empty:
-        return FoundSpecs(lookup.specs, source=SpecsSource.GEMINI, caveat=lookup.caveat)
-
-    pasted = _offer_paste(context.terminal, imdb_id) if _can_prompt(context.terminal, args) else ""
-    if not pasted.strip():
-        return FoundSpecs(TechnicalSpecs(), warnings=(f"{NO_ROWS_FOUND} {GUESSED_FROM_YEAR}",))
-
-    specs = parse_technical(pasted[:MAX_SPECS_CHARS])
-    if specs.is_empty:
         return FoundSpecs(
-            specs,
-            warnings=(f"Nothing recognisable in what you pasted. {GUESSED_FROM_YEAR}",),
+            lookup.specs,
+            source=SpecsSource.GEMINI,
+            caveat=lookup.caveat,
+            label=lookup.summary,
         )
-    return FoundSpecs(specs, source=SpecsSource.PASTED, caveat="pasted from the technical page")
 
+    if not (context.terminal.interactive and not args.yes):
+        return FoundSpecs(warnings=(f"{NO_ROWS_FOUND} {GUESSED_FROM_YEAR}",))
 
-def _specs_from_file(raw: Path) -> FoundSpecs:
-    path = raw.expanduser()
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError as exc:
-        raise SetupProblem(f"--specs {path}: {exc.strerror or exc}.") from exc
-
-    specs = parse_technical(text[:MAX_SPECS_CHARS])
-    if specs.is_empty:
-        return FoundSpecs(
-            specs,
-            warnings=(
-                f"Nothing recognisable in {path.name} — no negative format, no aspect "
-                f"ratio. {GUESSED_FROM_YEAR}",
-            ),
-        )
-    return FoundSpecs(specs, source=SpecsSource.PASTED, caveat=f"pasted from {path.name}")
+    found = specs_from_paste(_offer_paste(context.terminal, imdb_id))
+    if found.source is None and not found.warnings:
+        return FoundSpecs(warnings=(f"{NO_ROWS_FOUND} {GUESSED_FROM_YEAR}",))
+    return found
 
 
 def _why_no_lookup(args: argparse.Namespace, imdb_id: str | None, gemini: GeminiClient) -> str:
@@ -489,15 +476,11 @@ def _why_no_lookup(args: argparse.Namespace, imdb_id: str | None, gemini: Gemini
     return GUESSED_FROM_YEAR  # pragma: no cover - the three above are the only ways here
 
 
-def _can_prompt(terminal: Terminal, args: argparse.Namespace) -> bool:
-    return terminal.interactive and not args.yes
-
-
 def _offer_paste(terminal: Terminal, imdb_id: str) -> str:
     """Print the technical page's address and open a box to paste it into."""
     terminal.write()
     terminal.write(NO_ROWS_FOUND)
-    terminal.write(f"  https://www.imdb.com/title/{imdb_id}/technical/")
+    terminal.write(f"  {technical_url(imdb_id)}")
     terminal.write("Select the specifications there and paste them below.")
     return terminal.paste("Paste, then Ctrl-D. Ctrl-D on its own guesses grain from the year.")
 
@@ -510,25 +493,16 @@ def _prefer(advice: Advice, encoder: Encoder) -> None:
     advice.plans.sort(key=lambda plan: plan.encoder is not encoder)
 
 
-def _write(
-    advice: Advice,
-    request: EncodeRequest,
-    *,
-    stem: str,
-    out_dir: Path,
-    media_dir: Path,
-    found: FoundSpecs,
-    movie: Movie | None,
-) -> Written:
+def _write(advice: Advice, request: EncodeRequest, answers: Answers, *, media_dir: Path) -> Written:
     try:
         return write_outputs(
             advice,
             request,
-            stem=stem,
-            directory=out_dir,
+            stem=request.output_stem,
+            directory=answers.out_dir,
             media_dir=media_dir,
-            movie=movie,
-            specs_caveat=found.caveat,
+            movie=answers.movie,
+            specs_caveat=answers.found.caveat,
             force=True,  # the refusal already happened, before anything was asked
         )
     except (OutputExists, OSError) as exc:
@@ -538,9 +512,8 @@ def _write(
 def _report(
     advice: Advice,
     request: EncodeRequest,
+    answers: Answers,
     *,
-    movie: Movie | None,
-    found: FoundSpecs,
     written: Written,
     quiet: bool,
 ) -> None:
@@ -550,6 +523,10 @@ def _report(
         return
     sys.stdout.write(
         render_report(
-            advice, request, movie=movie, specs_caveat=found.caveat, written=written.paths
+            advice,
+            request,
+            movie=answers.movie,
+            specs_caveat=answers.found.caveat,
+            written=written.paths,
         )
     )
