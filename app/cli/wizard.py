@@ -115,9 +115,10 @@ class Encode(StrEnum):
 
 
 class Ready(StrEnum):
-    """The last screen: write, or go back to any step that led here."""
+    """The last screen: write, show, or go back to any step that led here."""
 
     WRITE = "write"
+    SHOW = "show"
     FILM = "film"
     ROWS = "rows"
     ENCODE = "encode"
@@ -170,6 +171,7 @@ class Answers:
 
     out_dir: Path
     force: bool = False
+    write: bool = True
     source_warnings: tuple[str, ...] = ()
     movie: Movie | None = None
     imdb_id: str | None = None
@@ -194,6 +196,7 @@ def answers_from(args: argparse.Namespace, *, out_dir: Path, found: FoundSpecs) 
     return Answers(
         out_dir=out_dir,
         force=bool(args.force),
+        write=bool(args.write),
         movie=None,
         imdb_id=args.imdb_id,
         found=found,
@@ -253,6 +256,10 @@ class Wizard:
         while True:
             match self._ready_step():
                 case Ready.WRITE:
+                    self._answers.write = True
+                    return self._answers
+                case Ready.SHOW:
+                    self._answers.write = False
                     return self._answers
                 case Ready.FILM:
                     await self._film_step()
@@ -797,8 +804,11 @@ class Wizard:
         self._note(f"Rows     {answers.found.describe}")
         self._note(f"Grain    {self._grain_line()}")
         self._note(f"Encode   {encode}")
-        for suffix in (PRESET_SUFFIX, SCRIPT_SUFFIX):
-            self._note(f"Write    {answers.out_dir / f'{self._stem}{suffix}'}")
+        if answers.write:
+            for suffix in (PRESET_SUFFIX, SCRIPT_SUFFIX):
+                self._note(f"Write    {answers.out_dir / f'{self._stem}{suffix}'}")
+        else:
+            self._note("Write    nothing — the settings are printed instead")
 
         return self._pick(
             _step(4, "Write the two files?"),
@@ -808,11 +818,18 @@ class Wizard:
                     label="Write them",
                     detail="a HandBrake preset and an FFmpeg script",
                 ),
+                Choice(
+                    value=Ready.SHOW,
+                    label="Show them instead",
+                    detail="print the settings and both commands, and write nothing",
+                ),
                 Choice(value=Ready.FILM, label="Back to the film"),
                 Choice(value=Ready.ROWS, label="Back to the technical rows"),
                 Choice(value=Ready.ENCODE, label="Back to the encode settings"),
                 Choice(value=Ready.STOP, label="Stop, and write nothing"),
             ],
+            # --no-write asked for the settings, so that is the row Enter should land on.
+            start=0 if answers.write else 1,
         )
 
 

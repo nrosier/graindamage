@@ -421,16 +421,18 @@ Ready.
 
 Step 4 of 4 · Write the two files?
  ▸ Write them  a HandBrake preset and an FFmpeg script
+   Show them instead  print the settings and both commands, and write nothing
    Back to the film
    Back to the technical rows
    Back to the encode settings
    Stop, and write nothing
 ```
 
-Nothing is written until that Enter, nothing is overwritten without being asked — files
-already in the way are the *first* question, before any network call — and prompts go to
-stderr while the report goes to stdout, so `graindamage film.mkv > notes.txt` still shows
-you the menus.
+Nothing is written until that Enter, and nothing is overwritten without being asked — files
+already in the way are the *first* question, before any network call. **Show them instead**
+is there for a library you cannot write to: the report carries both commands for both
+encoders, so it is the whole answer and not a receipt. Prompts go to stderr while the
+report goes to stdout, so `graindamage film.mkv > notes.txt` still shows you the menus.
 
 ### No argument at all
 
@@ -472,6 +474,13 @@ The script `cd`s to the film's directory and names the film by its basename, so 
 inside a container still runs on the host that mounted it. Its header carries the film, the
 grain level and its reasons, and where the technical rows came from.
 
+Neither file is compulsory. `--no-write` prints the settings and both commands and touches
+nothing; `--print preset` and `--print script` put one document on stdout, byte for byte
+what the file would have held, so `--print preset > ~/mine.json` works on a mount you have
+no permission to write to. And a write that *does* fail no longer costs the run: the report
+is printed in full, its tail says what could not be written and why, and the exit code says
+the files are missing.
+
 ### Flags
 
 Every one of them is optional, including the file. They exist to skip a step you already
@@ -491,6 +500,8 @@ script.
 | `--bit-depth 8\|10\|12` | Force the encoding bit depth |
 | `--outdir DIR` | Write the two files here instead |
 | `--force` | Replace files that are already there |
+| `--no-write` | Print the settings and both commands; write no files, and ignore any in the way |
+| `--print preset\|script` | Put one document on stdout instead of in a file, and write nothing |
 | `--no-gemini` | No Gemini at all: the rules engine decides, and no technical look-up |
 | `--no-menu` | Take the answers from these flags rather than asking step by step |
 | `-y`, `--yes` | No questions at all: the best-matching hit, no menus |
@@ -501,9 +512,9 @@ Exit codes:
 
 | Exit | Means |
 | ---- | ----- |
-| `0` | Both files written |
+| `0` | Both files written, or the settings printed because you asked for them instead |
 | `1` | You stopped it; nothing was written |
-| `2` | Setup or usage: no such file, a directory, no file to work on, `ffprobe` missing or refusing the file, outputs already there on the flag path, a bad flag |
+| `2` | Setup or usage: no such file, a directory, no file to work on, `ffprobe` missing or refusing the file, outputs already there on the flag path, a directory that would not take them, a bad flag |
 | `130` | Ctrl-C |
 
 No key is required. Without `TMDB_API_KEY` the film step offers the IMDb-id row and the

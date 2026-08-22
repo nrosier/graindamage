@@ -208,6 +208,17 @@ def test_a_film_becomes_a_preset_and_a_script(
     assert str(preset) in printed and str(script) in printed
 
 
+def test_the_report_carries_both_commands_for_both_plans(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The report is a deliverable, not a receipt: it has to be enough to run the encode."""
+    main([str(film_in(tmp_path)), "--yes"], context=context())
+
+    lines = capsys.readouterr().out.splitlines()
+    assert len([line for line in lines if "ffmpeg     ffmpeg -i" in line]) == 2
+    assert len([line for line in lines if "HandBrake  HandBrakeCLI -i" in line]) == 2
+
+
 def test_the_filename_is_what_gets_searched_for(tmp_path: Path) -> None:
     client, seen = tmdb_transport()
 
@@ -514,6 +525,93 @@ def test_an_output_directory_of_its_own_still_points_at_the_film(tmp_path: Path)
     preset, script = written_files(elsewhere, film)
     assert preset.exists()
     assert f"cd -- {tmp_path}" in script.read_text()
+
+
+# --- showing instead of writing --------------------------------------------
+
+
+def test_no_write_prints_the_settings_and_leaves_the_directory_alone(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    film = film_in(tmp_path)
+
+    assert main([str(film), "--yes", "--no-write"], context=context()) == EXIT_OK
+
+    assert not any(path.exists() for path in written_files(tmp_path, film))
+    printed = capsys.readouterr().out
+    assert "Not written" in printed
+    assert "You asked for the settings only" in printed
+    assert "HandBrake  HandBrakeCLI -i" in printed
+
+
+def test_no_write_pays_no_attention_to_files_in_the_way(tmp_path: Path) -> None:
+    """The clash check guards the writing, and there is none: nothing is at risk."""
+    film = film_in(tmp_path)
+    _, script = written_files(tmp_path, film)
+    script.write_text("# one I edited myself\n")
+
+    assert main([str(film), "--yes", "--no-write"], context=context()) == EXIT_OK
+    assert script.read_text() == "# one I edited myself\n"
+
+
+def test_print_preset_puts_the_document_on_stdout_and_nothing_else(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """And byte for byte the file, so a redirected one can be imported as it stands."""
+    film = film_in(tmp_path)
+
+    assert main([str(film), "--yes", "--print", "preset"], context=context()) == EXIT_OK
+
+    emitted = capsys.readouterr().out
+    assert len(json.loads(emitted)["PresetList"]) == 2
+    assert not any(path.exists() for path in written_files(tmp_path, film))
+
+    assert main([str(film), "--yes"], context=context()) == EXIT_OK
+    capsys.readouterr()
+    assert emitted == written_files(tmp_path, film)[0].read_text()
+
+
+def test_print_script_always_names_the_films_directory(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """One that came down a pipe has no location of its own to find the film from."""
+    code = main([str(film_in(tmp_path)), "--yes", "--print", "script"], context=context())
+
+    assert code == EXIT_OK
+    emitted = capsys.readouterr().out
+    assert emitted.startswith("#!/usr/bin/env bash")
+    assert f"cd -- {tmp_path}" in emitted
+
+
+def test_a_directory_that_will_not_take_the_files_still_gives_up_the_settings(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The whole run — probe, look-up, review — must not be thrown away by a write."""
+    blocked = tmp_path / "blocked"
+    blocked.write_text("not a directory\n")
+
+    code = main([str(film_in(tmp_path)), "--yes", "--outdir", str(blocked)], context=context())
+
+    assert code == EXIT_SETUP
+    printed = capsys.readouterr().out
+    assert "AV1 (SVT-AV1)" in printed
+    assert "Not written" in printed
+    assert "pass --outdir DIR" in printed
+
+
+def test_a_write_that_fails_quietly_says_so_on_stderr(tmp_path: Path) -> None:
+    """``--quiet`` leaves no report to carry the reason, so it goes where warnings go."""
+    terminal, err = paper()
+    blocked = tmp_path / "blocked"
+    blocked.write_text("not a directory\n")
+
+    code = main(
+        [str(film_in(tmp_path)), "--yes", "--quiet", "--outdir", str(blocked)],
+        context=context(terminal=terminal),
+    )
+
+    assert code == EXIT_SETUP
+    assert "Could not write beside" in err.getvalue()
 
 
 # --- refusing ---------------------------------------------------------------

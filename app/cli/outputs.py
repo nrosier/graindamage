@@ -80,6 +80,15 @@ def preset_document(advice: Advice, request: EncodeRequest) -> dict[str, Any]:
     return {**documents[0], "PresetList": presets}
 
 
+def preset_text(advice: Advice, request: EncodeRequest) -> str:
+    """:func:`preset_document` as the exact bytes the file holds.
+
+    ``--print preset`` and the written file both come through here, so the one that goes
+    down a pipe cannot drift from the one on disk.
+    """
+    return json.dumps(preset_document(advice, request), indent=2) + "\n"
+
+
 def script_text(
     advice: Advice,
     request: EncodeRequest,
@@ -167,9 +176,7 @@ def write_outputs(
         refuse_existing(directory, stem)
 
     directory.mkdir(parents=True, exist_ok=True)
-    preset_path.write_text(
-        json.dumps(preset_document(advice, request), indent=2) + "\n", encoding="utf-8"
-    )
+    preset_path.write_text(preset_text(advice, request), encoding="utf-8")
     script_path.write_text(
         script_text(
             advice,

@@ -38,7 +38,14 @@ from pathlib import Path
 from app import __version__
 from app.advice import finish_advice
 from app.cli.filename import NameGuess, guess_name
-from app.cli.outputs import OutputExists, Written, refuse_existing, write_outputs
+from app.cli.outputs import (
+    OutputExists,
+    Written,
+    preset_text,
+    refuse_existing,
+    script_text,
+    write_outputs,
+)
 from app.cli.probe import ProbeFailed, probe
 from app.cli.prompts import Choice, Terminal
 from app.cli.report import render_report
@@ -86,12 +93,25 @@ _MIN_YEAR, _MAX_YEAR = 1888, 2100
 
 NO_FILE = "Which film? Give me the path to one video file: graindamage /media/film.mkv"
 
+# Why a run ended with no paths. Both go in the report's tail, under "Not written".
+NOT_ASKED = "You asked for the settings only — everything above is complete."
+WRITE_FAILED = (
+    "The settings above are complete — pass --outdir DIR to put the files somewhere writable."
+)
+
 
 class Extra(StrEnum):
     """The two rows on the flag path's film menu that are not films."""
 
     RETYPE = "retype"
     ABORT = "abort"
+
+
+class Emit(StrEnum):
+    """The one document ``--print`` puts on stdout, in place of the report."""
+
+    PRESET = "preset"
+    SCRIPT = "script"
 
 
 # --- the argument surface ---------------------------------------------------
@@ -105,7 +125,8 @@ def build_parser() -> argparse.ArgumentParser:
             "With a terminal and no --yes, every step is a menu: arrows move, enter "
             "chooses, q stops. Writes <name>.graindamage.json (a HandBrake preset "
             "holding both encoders) and <name>.graindamage.sh (the FFmpeg command) "
-            "beside the file."
+            "beside the file — or, with --no-write, prints the settings and both "
+            "commands and leaves the directory alone."
         ),
     )
     parser.add_argument(
@@ -159,6 +180,18 @@ def build_parser() -> argparse.ArgumentParser:
     run = parser.add_argument_group("this run")
     run.add_argument("--outdir", type=Path, help="write the two files here instead")
     run.add_argument("--force", action="store_true", help="replace files that are already there")
+    run.add_argument(
+        "--no-write",
+        dest="write",
+        action="store_false",
+        help="print the settings and both commands, and write no files",
+    )
+    run.add_argument(
+        "--print",
+        dest="emit",
+        choices=[member.value for member in Emit],
+        help="put one document on stdout instead of in a file, and write nothing",
+    )
     run.add_argument(
         "--no-gemini",
         dest="gemini",
@@ -217,12 +250,13 @@ def main(argv: Sequence[str] | None = None, *, context: Context | None = None) -
 
 async def _run(args: argparse.Namespace, context: Context) -> int:
     """Gather, advise, write, report. The gathering is the only part with two shapes."""
+    _settle(args)
     terminal = context.terminal
     path = _input_path(args, terminal)
     stem = path.stem
     menus = _menus_wanted(args, terminal)
 
-    if not (args.force or menus):
+    if args.write and not (args.force or menus):
         try:
             refuse_existing((args.outdir or path.parent).expanduser(), stem)
         except OutputExists as exc:
@@ -262,9 +296,30 @@ async def _run(args: argparse.Namespace, context: Context) -> int:
     if answers.encoder:
         _prefer(advice, answers.encoder)
 
-    written = _write(advice, request, answers, media_dir=path.parent)
-    _report(advice, request, answers, written=written, quiet=args.quiet)
-    return EXIT_OK
+    if args.emit is not None:
+        _emit(Emit(args.emit), advice, request, answers, media_dir=path.parent)
+        return EXIT_OK
+
+    written, unwritten = _write(advice, request, answers, media_dir=path.parent)
+    _report(
+        advice,
+        request,
+        answers,
+        written=written,
+        unwritten=unwritten,
+        quiet=args.quiet,
+        terminal=terminal,
+    )
+    # The advice always arrives now. The exit code is about the files: asking for them and
+    # getting none is a failure, however complete the report above it is.
+    return EXIT_OK if written is not None or not answers.write else EXIT_SETUP
+
+
+def _settle(args: argparse.Namespace) -> None:
+    """``--print`` is one document on stdout, so it implies no report and no files."""
+    if args.emit is not None:
+        args.quiet = True
+        args.write = False
 
 
 def _menus_wanted(args: argparse.Namespace, terminal: Terminal) -> bool:
@@ -493,9 +548,18 @@ def _prefer(advice: Advice, encoder: Encoder) -> None:
     advice.plans.sort(key=lambda plan: plan.encoder is not encoder)
 
 
-def _write(advice: Advice, request: EncodeRequest, answers: Answers, *, media_dir: Path) -> Written:
+def _write(
+    advice: Advice, request: EncodeRequest, answers: Answers, *, media_dir: Path
+) -> tuple[Written | None, str | None]:
+    """Write the two files, or say why not.
+
+    Nothing raised here: a directory that will not take the files must not cost the
+    settings, which by this point have been probed for, looked up and reasoned about.
+    """
+    if not answers.write:
+        return None, NOT_ASKED
     try:
-        return write_outputs(
+        written = write_outputs(
             advice,
             request,
             stem=request.output_stem,
@@ -506,7 +570,30 @@ def _write(advice: Advice, request: EncodeRequest, answers: Answers, *, media_di
             force=True,  # the refusal already happened, before anything was asked
         )
     except (OutputExists, OSError) as exc:
-        raise SetupProblem(f"Could not write beside {media_dir}: {exc}") from exc
+        return None, f"Could not write beside {answers.out_dir}: {exc}\n{WRITE_FAILED}"
+    return written, None
+
+
+def _emit(
+    kind: Emit, advice: Advice, request: EncodeRequest, answers: Answers, *, media_dir: Path
+) -> None:
+    """One document on stdout, and nothing else on it: ``--print``.
+
+    The script always names the film's directory here. One written beside the film finds
+    it from its own location, but one that came down a pipe has no location to ask.
+    """
+    if kind is Emit.PRESET:
+        sys.stdout.write(preset_text(advice, request))
+        return
+    sys.stdout.write(
+        script_text(
+            advice,
+            request,
+            movie=answers.movie,
+            specs_caveat=answers.found.caveat,
+            media_dir=str(media_dir),
+        )
+    )
 
 
 def _report(
@@ -514,12 +601,17 @@ def _report(
     request: EncodeRequest,
     answers: Answers,
     *,
-    written: Written,
+    written: Written | None,
+    unwritten: str | None,
     quiet: bool,
+    terminal: Terminal,
 ) -> None:
     if quiet:
-        for path in written.paths:
+        for path in written.paths if written else ():
             sys.stdout.write(f"{path}\n")
+        if unwritten:
+            # No report to carry it, so the reason goes where the other diagnostics go.
+            terminal.write(f"graindamage: {unwritten}")
         return
     sys.stdout.write(
         render_report(
@@ -527,6 +619,7 @@ def _report(
             request,
             movie=answers.movie,
             specs_caveat=answers.found.caveat,
-            written=written.paths,
+            written=written.paths if written else (),
+            unwritten=unwritten,
         )
     )

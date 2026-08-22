@@ -6,7 +6,8 @@ reached is a number you cannot argue with. Warnings come before notes, and the g
 line always says where the technical rows came from.
 
 Plain text, no colour. The output is as likely to end up in a pipe or a log as on a
-screen, and the two files written beside the film are the actual deliverable.
+screen, and it stands on its own: both commands are here, so a run that wrote no files
+still told you everything.
 """
 
 from __future__ import annotations
@@ -17,6 +18,8 @@ from pathlib import Path
 from app.models import Advice, EncodeRequest, EncoderPlan, Movie, SourceMedia
 
 INDENT = "  "
+# Wide enough for "HandBrake", which is the longest label a plan line takes.
+LABEL = 9
 
 
 def render_report(
@@ -26,10 +29,22 @@ def render_report(
     movie: Movie | None = None,
     specs_caveat: str | None = None,
     written: Iterable[Path] = (),
+    unwritten: str | None = None,
 ) -> str:
-    """The whole answer, ready to print."""
+    """The whole answer, ready to print.
+
+    ``unwritten`` is why there are no paths — asked for, or refused by the directory. It
+    ends the report so that a redirected one says for itself that nothing was written.
+    """
     return "\n".join(
-        _lines(advice, request, movie=movie, specs_caveat=specs_caveat, written=written)
+        _lines(
+            advice,
+            request,
+            movie=movie,
+            specs_caveat=specs_caveat,
+            written=written,
+            unwritten=unwritten,
+        )
     )
 
 
@@ -40,6 +55,7 @@ def _lines(
     movie: Movie | None,
     specs_caveat: str | None,
     written: Iterable[Path],
+    unwritten: str | None,
 ) -> Iterator[str]:
     yield ""
     yield from _film(movie)
@@ -60,6 +76,11 @@ def _lines(
         yield "Written"
         for path in paths:
             yield f"{INDENT}{path}"
+    if unwritten:
+        yield ""
+        yield "Not written"
+        for line in unwritten.splitlines():
+            yield f"{INDENT}{line}"
     yield ""
 
 
@@ -148,9 +169,16 @@ def _plan(plan: EncoderPlan) -> Iterator[str]:
     for adjustment in plan.adjustments:
         yield f"{INDENT}{adjustment.delta:+g}  {adjustment.label}"
     if plan.params:
-        yield f"{INDENT}params  {plan.params_string}"
+        yield _field("params", plan.params_string)
     if plan.ffmpeg_command:
-        yield f"{INDENT}{plan.ffmpeg_command}"
+        yield _field("ffmpeg", plan.ffmpeg_command)
+    if plan.handbrake_command:
+        yield _field("HandBrake", plan.handbrake_command)
+
+
+def _field(label: str, value: str) -> str:
+    """One labelled line under a plan, all three labels in the same column."""
+    return f"{INDENT}{label:<{LABEL}}  {value}"
 
 
 def _bullets(heading: str, items: list[str], *, mark: str) -> Iterator[str]:

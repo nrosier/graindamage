@@ -322,6 +322,35 @@ def test_the_last_step_goes_back_to_the_encode_settings(tmp_path: Path) -> None:
     assert "x265" in preset["PresetList"][0]["PresetName"]
 
 
+def test_the_show_row_prints_the_settings_and_writes_nothing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    terminal = Wizarding(
+        ["Blade Runner", "Ask Gemini", "Keep these rows", "These are fine", "Show them instead"]
+    )
+    film = film_in(tmp_path)
+
+    assert main([str(film)], context=context(terminal=terminal)) == EXIT_OK
+
+    assert not any(path.exists() for path in written_files(tmp_path, film))
+    printed = capsys.readouterr().out
+    assert "HandBrake  HandBrakeCLI -i" in printed
+    assert "You asked for the settings only" in printed
+
+
+def test_no_write_puts_the_cursor_on_the_show_row(tmp_path: Path) -> None:
+    """--no-write has already answered step 4, so four Enters must not write anything."""
+    terminal = Wizarding()
+    film = film_in(tmp_path)
+
+    assert main([str(film), "--no-write"], context=context(terminal=terminal)) == EXIT_OK
+
+    assert not any(path.exists() for path in written_files(tmp_path, film))
+    drawn = terminal.err.getvalue()
+    assert "Write    nothing — the settings are printed instead" in drawn
+    assert "▸ Show them instead" in drawn
+
+
 def test_files_in_the_way_are_the_first_thing_asked_about(tmp_path: Path) -> None:
     """And answering "somewhere else" leaves the one that was in the way alone."""
     film = film_in(tmp_path)
