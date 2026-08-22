@@ -321,11 +321,11 @@ def _default_input_path(request: EncodeRequest) -> str:
 
 
 async def _advise(services: Services, inputs: AdviceInputs) -> tuple[Advice, Assembled]:
-    """Baseline advice, optionally reviewed by Gemini, with commands attached."""
+    """The settings for these inputs — Gemini's when it is asked, with commands attached."""
     assembled = await _assemble(services, inputs)
     advice = await finish_advice(
         assembled.request,
-        annotator=services.gemini if inputs.use_gemini and services.gemini.enabled else None,
+        decider=services.gemini if inputs.use_gemini and services.gemini.enabled else None,
         warnings=assembled.warnings,
     )
     return advice, assembled

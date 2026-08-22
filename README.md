@@ -5,15 +5,20 @@ Look up a film, describe your source file, and get encoding settings for **AV1
 characteristics (negative format, aspect ratio, grain) taken into account rather than
 guessed at.
 
-Every number comes with the reasoning attached: `CRF 27 = 28 for 1080p, −1 for 35 mm
-grain`. Nothing is a black box, and nothing needs an API key — the rules engine has no
-configuration and no network, so an empty container still produces real settings.
+With a `GEMINI_API_KEY`, **Gemini decides.** It is handed the film's production details,
+its IMDb technical rows and the full parse of your file, and it returns the settings: a
+CRF, the named factors that add up to it, a preset, a tune, the complete parameter set for
+each encoder, the grain profile and the reasoning. A table keyed on resolution and negative
+format cannot know that this transfer was already denoised, or that this negative is a
+fine-grained late camera stock rather than a dupe.
 
-With a `GEMINI_API_KEY`, those rules become a **proposal** rather than the answer: Gemini
-is handed the film, its technical rows, the parse of your file and the deterministic plan,
-and it decides — a table keyed on resolution and negative format cannot know what this
-particular film and this particular transfer need. Without a key the proposal stands on
-its own.
+Every number arrives with that reasoning attached: `CRF 27 = 28 for 1080p, −1 for 35 mm
+grain`. Nothing is a black box.
+
+Without a key there is still an answer, and it says what it is: settings from tables keyed
+on resolution, negative format and release year, labelled on the page and in the report as
+having read nothing about this film. A sound starting point and no more — that path has no
+configuration and no network, so an empty container still produces real settings.
 
 Two front-ends over one engine: a web page, and a command line that takes a file and
 writes a HandBrake preset and an FFmpeg script beside it. Both ship in a single Docker
@@ -28,7 +33,7 @@ Built in milestones; all eight are done (v0.8.0).
 | 1 | App skeleton, Docker image, `/healthz`, config reporting         | done  |
 | 2 | TMDB provider: title search and pick                             | done  |
 | 3 | ffprobe / mkvinfo / MediaInfo and IMDb `/technical` parsers      | done  |
-| 4 | Deterministic baseline rules (CRF, preset, grain handling)       | done  |
+| 4 | Offline table rules (CRF, preset, grain handling)                | done  |
 | 5 | Gemini structured advice + encoder-flag validation               | done  |
 | 6 | HandBrake CLI / FFmpeg command and `.json` preset rendering      | done  |
 | 7 | Routes, caching, error states, docs polish                       | done  |
@@ -43,19 +48,26 @@ Three steps in one page, each swapped in over HTMX:
 2. **Describe the source.** Paste `ffprobe`, `mkvinfo` or `mediainfo` output. The
    IMDb technical rows arrive from a Gemini look-up, or you paste those too. Every
    field is overridable by hand.
-3. **Get the settings.** Two plans — SVT-AV1 and x265 — each with a CRF derived from a
-   resolution anchor and named adjustments, a preset, a validated parameter string, a
-   HandBrake command, an FFmpeg command, and a downloadable HandBrake preset.
+3. **Get the settings.** Two plans — SVT-AV1 and x265 — each with a CRF and the named
+   factors that add up to it, a preset, a validated parameter string, a HandBrake
+   command, an FFmpeg command, and a downloadable HandBrake preset.
 
-Grain is inferred from the negative format and process (65 mm and digital-intermediate
-sources are clean; Super 16 and pushed 35 mm are not), and it is the single biggest
-input to the settings: x265 codes every grain particle, while SVT-AV1 can denoise and
-synthesise it back, so the two plans diverge more on a grainy film than a clean one.
+Grain is the single biggest input to the settings: x265 codes every grain particle,
+while SVT-AV1 can denoise and synthesise it back, so the two plans diverge more on a
+grainy film than a clean one. A heuristic estimate from the negative format and process
+(65 mm and digital-intermediate sources are clean; Super 16 and pushed 35 mm are not)
+goes to Gemini as a guess to weigh rather than an answer, so the level on the plan is
+the model's — unless you state it yourself, which is fixed. With no key the estimate
+stands on its own.
 
 ### Where the numbers come from
 
-CRF starts at a resolution anchor and moves by signed, labelled adjustments that stay
-visible on the plan:
+Every CRF arrives as an account: a starting point, then signed and labelled moves away
+from it, adding up to the number on the plan. When Gemini decides, those labels are its
+own reasoning about this film — *2160p starting point*, *35 mm grain*, *coded grain
+ceiling*.
+
+With no key the same shape is filled in from tables, starting at a resolution anchor:
 
 |            | SD | 720p | 1080p | 1440p | 2160p |
 | ---------- | -- | ---- | ----- | ----- | ----- |
@@ -68,15 +80,21 @@ rip at a low CRF only reprints someone else's artefacts at a larger size, and th
 says so rather than obliging.
 
 These anchors are conventional community values for 10-bit film encodes, not
-measurements. The size estimate is a single exponential fit through one anchor point:
-good enough to see that AV1 lands at roughly half the size, not good enough to plan a
-disc against.
+measurements, and they are never sent to the model: a starting point offered to a model is
+a starting point it agrees with. The facts underneath them are — the model is given the
+same bits-per-pixel figure and left to make of it what it will.
+
+The size estimate is a single exponential fit through one anchor point: good enough to see
+that AV1 lands at roughly half the size, not good enough to plan a disc against.
 
 ### Grain tuning
 
 Grain is what the settings are *for*, so both plans act on it directly rather than
-leaving it to the CRF. On SVT-AV1 the strength is the easy part and the denoise flag is
-the real decision:
+leaving it to the CRF. What follows is the doctrine: the prompt argues it to Gemini, and
+the tables apply it when there is no Gemini to argue with. The numbers below are the
+tables'; the model reasons its own out per film, which is the whole point of asking it.
+
+On SVT-AV1 the strength is the easy part and the denoise flag is the real decision:
 
 | Grain    | `film-grain` | `film-grain-denoise` | Max CRF | Effect                                   |
 | -------- | ------------ | -------------------- | ------- | ---------------------------------------- |
@@ -189,7 +207,7 @@ response schema on the same request, so a grounded look-up asks for JSON in word
 is parsed leniently; if the model or the key refuses the tool (HTTP 400) **or is out of
 search requests (HTTP 429)**, the app retries once without it, schema-constrained — the
 grounding quota is metered separately from, and far more tightly than, ordinary
-generation, so a key that can still review a plan is often out of searches long before
+generation, so a key that can still decide a plan is often out of searches long before
 it. Recalled rows say so on the page. Turning grounding off makes that the only
 path.
 
@@ -210,21 +228,24 @@ a guess.
 
 ## Gemini (optional)
 
-With `GEMINI_API_KEY` set, a checkbox appears that hands the decision to Gemini. **The
-rules engine proposes; Gemini decides.** It is given the film, the IMDb technical rows and
-the parse of your source file, and the deterministic plan arrives labelled as what it is —
-`"made_by": "deterministic rules engine — tables only, has not read this film"`. Where it
-disagrees, it changes the number and says why in the rationale. A table keyed on
-resolution and negative format cannot know that this particular transfer was already
-denoised, or that this negative is a fine-grained late camera stock rather than a dupe;
-the model has read enough about the film to weigh that, so it gets the last word.
+With `GEMINI_API_KEY` set, a checkbox appears that hands the decision to Gemini — the
+decision itself, not a review of someone else's. The model is given the film's production
+details, the IMDb technical rows, the full parse of your source file, your preferences, and
+a heuristic grain estimate labelled as the guess it is. Nothing has decided anything ahead
+of it: no proposal to edit, no table CRF, no default behind the answer to fall back on.
+What comes back **is** the settings — CRF, the factors that account for it, preset, tune,
+the complete parameter set for each encoder, the grain profile and the reasoning — and that
+is what you encode with.
 
-That means the CRF may go anywhere in the encoder's legal range — 10–55 for SVT-AV1,
-10–40 for x265 — with no cap on how far it moves from the proposal. On a film source the
-prompt requires grain parameters and era-specific reasoning (which stock, which generation
-of print, `film-grain-denoise` one way or the other and why), says outright that a plan
-moving the CRF and nothing else is not an answer, and states the real-grain CRF ceiling as
-a number to reason with rather than a rule to obey.
+So the prompt is where the judgement lives. The CRF may go anywhere in the encoder's legal
+range — 10–55 for SVT-AV1, 10–40 for x265 — and has to come with what the number costs or
+saves. Grain and CRF are stated to be one decision, with the real-grain CRF ceiling given
+as a number to reason with rather than a rule to obey. On a film source the prompt requires
+grain parameters and era-specific reasoning (which stock, which generation of print,
+`film-grain-denoise` one way or the other and why) and says outright that a plan giving a
+CRF and no grain settings is not an answer. And because there is nothing behind the answer,
+it asks for the fields that are easy to forget precisely because something used to supply
+them: `keyint`, and SVT-AV1's numeric `tune`.
 
 What is still enforced is only what would otherwise produce a broken command, or a
 silently wrong picture:
@@ -234,7 +255,12 @@ silently wrong picture:
   is in range *and* the value contains no shell-interesting characters.
 - CRF is clamped to the encoder's **usable range**, and to nothing narrower.
 - Parameters derived from your file's own colour signalling are **restored after
-  validation** — the model cannot see the file, so it has no business changing them.
+  validation** — the model cannot see the file, so it has no business changing them. An
+  omitted `keyint` is filled in with ten seconds of frames for the same reason: arithmetic
+  off the file, not a judgement about the film.
+- **The CRF account has to add up.** If the factors do not total the CRF, the difference
+  appears as its own row — *clamped to x265's range*, or *unaccounted for* — rather than
+  being quietly absorbed, so the printed reasoning is never a tidier story than the number.
 - A plan that codes real grain above the ceiling is **reported, never rewritten**: you get
   a warning pointing at the SVT-AV1 rationale so you can check whether this film is the
   exception the model thought it was.
@@ -243,7 +269,12 @@ silently wrong picture:
 The prompt deliberately excludes your local input path. Commands are assembled with
 `shlex.join`, never string interpolation.
 
-Without a key, the rules engine answers alone and the page says so.
+When there is no key, the box is unticked, `--no-gemini` is passed, or the call fails,
+the tables answer instead — and both front-ends say so where the settings are, not in a
+footnote: *from tables, not this film* on the page, *Settings from tables — nothing read
+this film* in the report, with a note spelling out what the tables are keyed on. A failed
+call adds its reason as a warning. What does not happen is a blend: the tables never fill a
+gap in a decided plan, and a decided plan is never a table's number with edits on top.
 
 ## Configuration
 
@@ -399,7 +430,7 @@ Step 3 of 4 · The encode
    Grain           moderate (Super 35 mm) — inferred, confidence 90%
    Bit depth       from the source — 10-bit
    Encoder order   AV1 (SVT-AV1) first
-   Gemini          deciding — the rules below are its proposal
+   Gemini          deciding these settings
    Stop, and write nothing
   ↑↓ move · 1-9 jump · enter choose · q abort
 ```
@@ -502,7 +533,7 @@ script.
 | `--force` | Replace files that are already there |
 | `--no-write` | Print the settings and both commands; write no files, and ignore any in the way |
 | `--print preset\|script` | Put one document on stdout instead of in a file, and write nothing |
-| `--no-gemini` | No Gemini at all: the rules engine decides, and no technical look-up |
+| `--no-gemini` | No Gemini at all: the settings come from the tables, labelled, and no technical look-up |
 | `--no-menu` | Take the answers from these flags rather than asking step by step |
 | `-y`, `--yes` | No questions at all: the best-matching hit, no menus |
 | `--ffprobe PATH` | A non-default `ffprobe` |
@@ -519,7 +550,7 @@ Exit codes:
 
 No key is required. Without `TMDB_API_KEY` the film step offers the IMDb-id row and the
 film-less row instead of hits; without `GEMINI_API_KEY` there is no look-up row and no
-review line, and pasting is the way to the rows. Each missing piece costs a warning in the
+Gemini line, and pasting is the way to the rows. Each missing piece costs a warning in the
 report, never the settings.
 
 ## Run with Docker
@@ -632,8 +663,8 @@ app/
   cache.py              async TTL cache, one per provider
   advice/
     grain.py            negative format and process → grain profile
-    rules.py            the deterministic baseline: CRF, preset, parameters
-    pipeline.py         the tail both front-ends share: review, note, commands
+    rules.py            the offline fallback: CRF, preset, parameters from tables
+    pipeline.py         the tail both share: ask, fall back, note, commands
     validate.py         allowlist for anything a model returns
     encoders.py         HandBrake and FFmpeg commands, HandBrake presets
   cli/
@@ -648,7 +679,7 @@ app/
   providers/
     tmdb.py             title search and metadata
     imdb.py             /technical parsing: paste or look-up
-    gemini.py           structured advice, merged over the baseline
+    gemini.py           the facts out, the decided settings back, validated
   sources/
     ffprobe.py mkvinfo.py mediainfo.py    the three source parsers
     parsing.py          tolerant number and unit parsing shared by them

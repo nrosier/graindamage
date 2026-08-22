@@ -155,6 +155,73 @@ def request_for(**overrides: Any) -> EncodeRequest:
     return EncodeRequest(**{**defaults, **overrides})
 
 
+# --- a complete answer from the model ---------------------------------------
+
+
+def gemini_answer(**overrides: Any) -> dict[str, Any]:
+    """A well-formed decision of the shape :data:`RESPONSE_SCHEMA` asks for.
+
+    One payload, shared, because the front-ends must not drift: nothing is inherited from
+    a table any more, so an answer that is short of a field is an answer with that field
+    *missing* — and a double that quietly omitted ``adjustments`` or a whole plan would
+    put every test using it on the fallback path without saying so.
+
+    Both plans carry a full parameter set, adjustments that add up to their CRF, and a
+    grain profile, which is what a real answer has to do.
+    """
+    payload: dict[str, Any] = {
+        "summary": "A 1982 anamorphic 35 mm negative with grain the DI kept on purpose.",
+        "notes": ["The opening flyover is the hardest shot in the film for any encoder."],
+        "warnings": [],
+        "grain": {
+            "level": "heavy",
+            "confidence": 0.85,
+            "origin_format": "35 mm",
+            "reasons": ["A 1982 anamorphic 35 mm negative, printed rather than scanned clean."],
+        },
+        "plans": [
+            {
+                "encoder": "svt-av1",
+                "crf": 26.0,
+                "preset": "3",
+                "adjustments": [
+                    {"label": "1080p starting point", "delta": 28.0, "detail": None},
+                    {"label": "heavy grain to code", "delta": -2.0, "detail": "Funds the grain."},
+                ],
+                "params": [
+                    {"name": "film-grain", "value": "8"},
+                    {"name": "film-grain-denoise", "value": "0"},
+                    {"name": "enable-restoration", "value": "0"},
+                    {"name": "qp-scale-compress-strength", "value": "3"},
+                    {"name": "tune", "value": "0"},
+                    {"name": "keyint", "value": "240"},
+                ],
+                "rationale": ["A slower preset pays for itself on the smoke and rain."],
+            },
+            {
+                "encoder": "x265",
+                "crf": 19.0,
+                "preset": "slower",
+                "tune": "grain",
+                "adjustments": [
+                    {"label": "1080p starting point", "delta": 20.0, "detail": None},
+                    {"label": "heavy grain to code", "delta": -1.0, "detail": None},
+                ],
+                "params": [
+                    {"name": "aq-mode", "value": "3"},
+                    {"name": "qcomp", "value": "0.75"},
+                    {"name": "psy-rd", "value": "1.5"},
+                    {"name": "psy-rdoq", "value": "3.0"},
+                    {"name": "deblock", "value": "-1"},
+                    {"name": "keyint", "value": "240"},
+                ],
+                "rationale": ["x265 codes every grain particle, so the grain tools carry it."],
+            },
+        ],
+    }
+    return {**payload, **overrides}
+
+
 # --- app builder ------------------------------------------------------------
 
 

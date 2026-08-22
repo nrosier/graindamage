@@ -23,7 +23,7 @@
     {% endif %}
     {% if video and video.is_hdr %}<li class="badge hdr">HDR</li>{% endif %}
     <li class="badge {{ 'ai' if advice.source.value == 'gemini' else '' }}">
-      {{ "decided by Gemini" if advice.source.value == "gemini" else "deterministic rules" }}
+      {{ "decided by Gemini" if advice.source.value == "gemini" else "from tables, not this film" }}
     </li>
   </ul>
 
@@ -144,9 +144,9 @@
 
 {% if advice.rejected_flags %}
   <div class="card notice">
-    <h2>Ignored suggestions</h2>
+    <h2>Dropped from the answer</h2>
     <p class="muted">
-      Gemini proposed these and they were dropped before reaching the command line —
+      Gemini returned these and they were dropped before reaching the command line —
       an unknown flag or an out-of-range value would fail the encode, not improve it.
     </p>
     <ul class="rejected">

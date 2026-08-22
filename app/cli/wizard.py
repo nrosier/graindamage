@@ -634,9 +634,9 @@ class Wizard:
                     Choice(
                         value=Encode.REVIEW,
                         label=_pad("Gemini"),
-                        detail="deciding — the rules below are its proposal"
+                        detail="deciding these settings"
                         if answers.review
-                        else "off — the rules engine's plan, unreviewed",
+                        else "off — settings come from tables instead",
                     )
                 )
             rows.append(Choice(value=Encode.STOP, label=_pad("Stop, and write nothing")))
@@ -737,12 +737,12 @@ class Wizard:
                             Choice(
                                 value=True,
                                 label="yes",
-                                detail="it reads the film and the rules' proposal, then decides",
+                                detail="it reads the film, the rows and your file, then decides",
                             ),
                             Choice(
                                 value=False,
                                 label="no",
-                                detail="the rules engine's tables and nothing else",
+                                detail="tables keyed on year and format; nothing reads the film",
                             ),
                         ],
                         answers.review,
@@ -754,7 +754,12 @@ class Wizard:
         return self._answers.encoder or Encoder.SVT_AV1
 
     def _grain_line(self, *, inferred: bool = False) -> str:
-        """What grain the rules would call this film, and on what evidence."""
+        """What the estimate calls this film's grain, and on what evidence.
+
+        The same estimate :func:`~app.advice.grain_for` gives the pipeline, reached the
+        same way — a menu has to show a level before anything has decided one, and if
+        Gemini is asked it may well come back disagreeing with this line.
+        """
         profile = infer_grain(
             self._answers.found.specs,
             self._report.media,

@@ -22,7 +22,14 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import __version__
-from tests.support import fixture, json_response, make_app, make_settings, mock_client
+from tests.support import (
+    fixture,
+    gemini_answer,
+    json_response,
+    make_app,
+    make_settings,
+    mock_client,
+)
 
 FFPROBE_REPORT = fixture("ffprobe_uhd_hdr.json")
 TECHNICAL_PAGE = fixture("imdb_technical_next_data.html")
@@ -107,9 +114,12 @@ def gemini_transport(
     specs: Any = None,
     response: httpx2.Response | None = None,
 ) -> tuple[httpx2.AsyncClient, list[httpx2.Request]]:
-    """A transport answering Gemini's two calls: the specs look-up and the review.
+    """A transport answering Gemini's two calls: the specs look-up and the decision.
 
-    They go to the same endpoint, so they are told apart by the question asked.
+    They go to the same endpoint, so they are told apart by the question asked. The
+    decision defaults to :func:`gemini_answer`, the complete payload the CLI's tests use
+    too — anything less than complete lands on the table fallback, which is a different
+    code path than most of these tests mean to exercise.
     """
     seen: list[httpx2.Request] = []
 
@@ -119,7 +129,7 @@ def gemini_transport(
             return response
         if b"Fetch the technical specifications" in request.content:
             return gemini_envelope(SPECS_ANSWER if specs is None else specs)
-        return gemini_envelope({"summary": "Reviewed for this film."} if answer is None else answer)
+        return gemini_envelope(gemini_answer() if answer is None else answer)
 
     return mock_client(handler), seen
 
@@ -424,7 +434,7 @@ def test_advice_covers_both_encoders_and_both_front_ends() -> None:
     assert "HDR" in text
     assert "blade-runner-1982-2160p.av1.mkv" in text
     assert "ffmpeg -i input.mkv -map 0" in text
-    assert "deterministic rules" in text
+    assert "from tables, not this film" in text
     assert "Read these first" not in text
 
 
@@ -520,24 +530,39 @@ def test_gemini_is_only_asked_when_the_box_is_ticked() -> None:
 
     unticked = client.post("/advise", data={"source_text": FFPROBE_REPORT})
     assert seen == []
-    assert "deterministic rules" in unticked.text
+    assert "from tables, not this film" in unticked.text
 
     ticked = client.post("/advise", data={"source_text": FFPROBE_REPORT, "use_gemini": "on"})
     assert len(seen) == 1
     assert "decided by Gemini" in ticked.text
-    assert "Reviewed for this film." in ticked.text
+    assert "grain the DI kept on purpose" in ticked.text
+    # Its own CRF, its own account of it — neither is a table's number.
+    assert "1080p starting point" in ticked.text
+    assert "heavy grain to code" in ticked.text
 
 
-def test_a_silent_gemini_leaves_the_baseline_standing() -> None:
+def test_a_silent_gemini_falls_back_to_the_tables_and_says_so() -> None:
+    """The answer still arrives, and it does not pretend to be the one that was asked for."""
     gemini, _ = gemini_transport(response=json_response({"error": "nope"}, 500))
     client = client_for(gemini=gemini, gemini_api_key="key")
 
     response = client.post("/advise", data={"source_text": FFPROBE_REPORT, "use_gemini": "on"})
 
     assert response.status_code == 200
-    assert "deterministic rules" in response.text
+    assert "from tables, not this film" in response.text
     assert "Gemini was asked but did not contribute" in response.text
+    assert "nothing in that path read the film" in response.text
     assert "libsvtav1" in response.text
+
+
+def test_with_no_key_the_page_says_nothing_read_the_film() -> None:
+    """The fallback is a fallback wherever it comes from, and it is labelled either way."""
+    text = client_for().post("/advise", data={"source_text": FFPROBE_REPORT}).text
+
+    assert "from tables, not this film" in text
+    assert "keyed on resolution, negative format and release year" in text
+    # No key means nothing was asked, so there is nothing to apologise for either.
+    assert "Gemini was asked but did not contribute" not in text
 
 
 def test_the_preset_form_carries_the_answer_forward() -> None:

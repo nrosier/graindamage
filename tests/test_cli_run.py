@@ -26,7 +26,7 @@ from app.cli.session import Context
 from app.config import Settings
 from app.providers.gemini import GeminiClient
 from app.providers.tmdb import TmdbClient
-from tests.support import fixture, json_response, make_settings, mock_client
+from tests.support import fixture, gemini_answer, json_response, make_settings, mock_client
 
 FILM_NAME = "Blade.Runner.1982.2160p.BluRay.x265-GRP.mkv"
 FFPROBE_REPORT = fixture("ffprobe_uhd_hdr.json")
@@ -95,14 +95,18 @@ def tmdb_transport(
 
 
 def gemini_transport(specs: Any = None) -> tuple[httpx2.AsyncClient, list[httpx2.Request]]:
-    """Answers Gemini's two calls, told apart by the question each one asks."""
+    """Answers Gemini's two calls, told apart by the question each one asks.
+
+    The decision is :func:`~tests.support.gemini_answer`, shared with the web tests so the
+    two front-ends are shown the same answer and cannot drift on what they do with it.
+    """
     seen: list[httpx2.Request] = []
 
     def handler(request: httpx2.Request) -> httpx2.Response:
         seen.append(request)
         answer = SPECS_ANSWER if specs is None else specs
         if b"Fetch the technical specifications" not in request.content:
-            answer = {"summary": "Reviewed for this film."}
+            answer = gemini_answer()
         return httpx2.Response(
             200,
             json={

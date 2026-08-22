@@ -15,7 +15,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Iterator
 from pathlib import Path
 
-from app.models import Advice, EncodeRequest, EncoderPlan, Movie, SourceMedia
+from app.models import Advice, AdviceSource, EncodeRequest, EncoderPlan, Movie, SourceMedia
 
 INDENT = "  "
 # Wide enough for "HandBrake", which is the longest label a plan line takes.
@@ -101,6 +101,10 @@ def _film(movie: Movie | None) -> Iterator[str]:
 
 def _facts(advice: Advice, request: EncodeRequest, specs_caveat: str | None) -> Iterator[str]:
     yield f"Source   {source_summary(request.source)}"
+    # Who decided, on its own line: everything below reads the same either way, and the
+    # difference between a decision made for this film and a table lookup is the single
+    # most important thing to know before acting on any of it. The notes carry the rest.
+    yield f"Settings {_decided_by(advice.source)}"
 
     grain = advice.grain
     origin = f" ({grain.origin_format})" if grain.origin_format else ""
@@ -114,6 +118,12 @@ def _facts(advice: Advice, request: EncodeRequest, specs_caveat: str | None) -> 
     if advice.summary:
         yield ""
         yield advice.summary
+
+
+def _decided_by(source: AdviceSource) -> str:
+    if source is AdviceSource.GEMINI:
+        return "decided by Gemini for this film"
+    return "from tables — nothing read this film (see Notes)"
 
 
 def source_summary(media: SourceMedia) -> str:

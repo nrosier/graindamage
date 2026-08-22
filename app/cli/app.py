@@ -8,9 +8,10 @@ instead, which is what a script wants. Either way it reads the title out of the 
 runs ``ffprobe`` on the file, and writes a HandBrake preset and an FFmpeg script beside
 the film.
 
-The advice is the web app's advice: same rules engine, same optional Gemini review, same
-validation, same wording for the caveats. This module only decides what goes in and lays
-what comes out down.
+The advice is the web app's advice: the same facts collected, the same model asked to
+decide from them, the same validation, the same table fallback when there is no model and
+the same wording for the caveats. This module only decides what goes in and lays what
+comes out down.
 
 Three habits keep it honest:
 
@@ -287,10 +288,10 @@ async def _run(args: argparse.Namespace, context: Context) -> int:
 
     request = _request(answers, path=path, report=report, guess=guess)
     if answers.review and not args.quiet:
-        terminal.write("Asking Gemini to review the plan…")
+        terminal.write("Asking Gemini to decide the settings…")
     advice = await finish_advice(
         request,
-        annotator=context.gemini if answers.review else None,
+        decider=context.gemini if answers.review else None,
         warnings=answers.warnings,
     )
     if answers.encoder:
@@ -422,8 +423,9 @@ async def _find_movie(
 ) -> tuple[Movie | None, str | None]:
     """Search, offer the hits, and follow the pick up with a details request.
 
-    A film-less run is a working run — the rules engine only needs the file — so every
-    failure here degrades to ``(None, warning)``. Only the user saying *stop* aborts.
+    A film-less run is a working run — the file alone is enough to decide from, if not
+    as well — so every failure here degrades to ``(None, warning)``. Only the user
+    saying *stop* aborts.
     """
     tmdb = context.tmdb
     if not tmdb.enabled:

@@ -1,8 +1,15 @@
-"""The deterministic baseline: CRF, preset and encoder parameters, with reasons.
+"""The offline fallback: CRF, preset and encoder parameters from tables, with reasons.
 
-This module is the product's floor. It has no API keys, no network and no model
-behind it, so an unconfigured container still produces real settings — Gemini in
-milestone 5 only ever *annotates* what comes out of here, and is validated against it.
+This module is the product's floor, and only its floor. Deciding the settings is
+:mod:`app.providers.gemini`'s job, because deciding means weighing this film's
+production details, its technical rows and a parse of the source file against each
+other, and tables cannot do that. What is here has no API keys, no network and no model
+behind it, so an unconfigured container still produces real settings — and when they are
+what the user gets, :data:`~app.advice.pipeline.TABLES_ONLY_NOTE` says so on the page.
+
+Nothing here is ever sent to the model, and nothing here fills a gap in the model's
+answer. A blend of the two would be neither: it would read as a decision while still
+being a table underneath.
 
 Every number is reached by starting from a resolution-dependent anchor and applying
 named, signed adjustments, which are kept on the plan (:class:`Adjustment`) rather
@@ -238,7 +245,13 @@ def _source_quality_delta(video: VideoTrack | None) -> tuple[float, str | None, 
     )
 
 
-def _keyint(video: VideoTrack | None) -> int:
+def keyint_for(video: VideoTrack | None) -> int:
+    """Ten seconds of frames, which is arithmetic on the file rather than a judgement.
+
+    Public because the Gemini path needs the same number: the model sets ``keyint``
+    itself, and a command line that lost its keyframe interval because a model omitted
+    one field is a worse failure than a convention applied on its behalf.
+    """
     frame_rate = (video.frame_rate if video else None) or DEFAULT_FRAME_RATE
     return round(frame_rate * KEYFRAME_SECONDS)
 
@@ -307,11 +320,13 @@ def _is_coarse_stock(request: EncodeRequest, grain: GrainProfile) -> bool:
     return year is not None and year <= _COARSE_STOCK_YEAR
 
 
-def _colour_params(encoder: Encoder, video: VideoTrack | None) -> dict[str, str]:
+def colour_params(encoder: Encoder, video: VideoTrack | None) -> dict[str, str]:
     """Carry the source's colour signalling into the encode.
 
     Dropping this is the classic way to end up with a washed-out or fluorescent HDR
-    encode: the pixels survive but nothing tells the display what they mean.
+    encode: the pixels survive but nothing tells the display what they mean. Public for
+    the same reason as :func:`keyint_for`: these values are read off the file, so they
+    are the one part of a decided plan the model has nothing to contribute to.
     """
     if video is None:
         return {}
@@ -412,7 +427,7 @@ def _svt_av1_plan(request: EncodeRequest, grain: GrainProfile) -> EncoderPlan:
         # tune=0 optimises for subjective quality; the default (1) optimises PSNR,
         # which systematically prefers smoothing film grain away.
         "tune": "0",
-        "keyint": str(_keyint(video)),
+        "keyint": str(keyint_for(video)),
         "scd": "1",
     }
 
@@ -520,7 +535,7 @@ def _svt_av1_plan(request: EncodeRequest, grain: GrainProfile) -> EncoderPlan:
             "Coarse early stock is where that difference shows first."
         )
 
-    params.update(_colour_params(Encoder.SVT_AV1, video))
+    params.update(colour_params(Encoder.SVT_AV1, video))
 
     rationale.append(
         "10-bit output regardless of the source's depth: it costs a few percent, "
@@ -598,8 +613,8 @@ def _x265_plan(request: EncodeRequest, grain: GrainProfile) -> EncoderPlan:
 
     tune: str | None = None
     params: dict[str, str] = {
-        "keyint": str(_keyint(video)),
-        "min-keyint": str(max(1, _keyint(video) // 10)),
+        "keyint": str(keyint_for(video)),
+        "min-keyint": str(max(1, keyint_for(video) // 10)),
     }
 
     if grain.level.rank >= GrainLevel.MODERATE.rank:
@@ -657,7 +672,7 @@ def _x265_plan(request: EncodeRequest, grain: GrainProfile) -> EncoderPlan:
             "sources it costs more texture than it saves bits."
         )
 
-    params.update(_colour_params(Encoder.X265, video))
+    params.update(colour_params(Encoder.X265, video))
 
     rationale.append(
         "Use a 10-bit x265 build (x265_10bit / -pix_fmt yuv420p10le). 10-bit HEVC is "
@@ -777,14 +792,28 @@ def _cross_cutting_notes(
     return notes, warnings
 
 
-def build_advice(request: EncodeRequest) -> Advice:
-    """Produce the baseline advice for a request. Never raises, never calls out."""
-    grain = infer_grain(
+def grain_for(request: EncodeRequest) -> GrainProfile:
+    """The heuristic grain estimate for a request.
+
+    Two callers want the same estimate for different reasons and must agree on it: this
+    module builds its plans on it, and :func:`~app.providers.gemini.build_context` sends
+    it to the model as one fact among many — a guess to be weighed, and the model is free
+    to disagree. A hand-set level comes back as one, at confidence 1.0.
+
+    The CLI's menus want it too, before there is a request to ask about, so they call
+    :func:`~app.advice.grain.infer_grain` with these same four arguments.
+    """
+    return infer_grain(
         request.specs,
         request.source,
         year=_release_year(request),
         override=request.grain_override,
     )
+
+
+def build_advice(request: EncodeRequest) -> Advice:
+    """Produce the table-derived advice for a request. Never raises, never calls out."""
+    grain = grain_for(request)
 
     if request.bit_depth_override and request.source.video:
         request.source.video.bit_depth = request.bit_depth_override

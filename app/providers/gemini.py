@@ -1,44 +1,47 @@
-"""Gemini decides the settings; the rules engine proposes them.
+"""Gemini decides the settings. Nothing here proposes them first.
 
-This is where the advice is actually made. :mod:`app.advice.rules` gets there first and
-produces a complete, coherent plan from tables keyed on resolution, negative format and
-release year — but tables cannot read a film. The model can: it is given the production
-details, the IMDb technical rows, a full parse of the user's source file, the
-preferences, and the rules engine's plan *as a proposal*, and it is asked to decide what
-this particular film should be encoded with. Where it disagrees with the proposal, it
-wins, and the disagreement is shown to the user as a labelled adjustment rather than
-hidden.
+This is where the advice is made. The model is given the film's production details, the
+IMDb technical rows, a full parse of the user's source file, the preferences and a
+heuristic grain estimate, and it answers with the whole thing: CRF, the named steps that
+add up to it, preset, tune, the complete parameter set, the grain profile it settled on,
+and the prose. That answer *is* the advice — it is validated, not edited.
+
+That is a deliberate reversal. :mod:`app.advice.rules` used to produce a plan first,
+send it here as a proposal, and receive the model's answer folded back on top of it, so
+every parameter the model did not mention silently kept its table value and the model's
+CRF was shown as one delta away from a table. The tables now do one job: they are the
+answer when there is no model at all, labelled as such by
+:data:`~app.advice.pipeline.TABLES_ONLY_NOTE`. They are never sent, and they never fill
+a gap in what came back.
 
 It is asked for structured output (``responseMimeType: application/json`` plus a
 ``responseSchema``), and everything it returns passes through
 :mod:`app.advice.validate` before it can reach a command line.
 
-What the model decides:
+What is checked, and what is left alone:
 
-* CRF, anywhere inside the encoder's own legal range. There is no bound on how far it
-  may move from the proposal — the reasoning behind a number is what makes it right,
-  and the model is the only party here that has seen the film.
-* Preset and (for x265) tune, from the real ladders.
-* The grain strategy: whether this negative's own grain is coded or denoised and
-  re-synthesised, and every parameter that follows from that choice.
-* Any allowlisted encoder parameter — it can add or change them, but not remove them.
-  Losing ``keyint`` or a colour tag because a model omitted it from its answer is a
-  worse failure than being unable to drop ``sao=0``; every parameter that matters has
-  an explicit off value to set instead.
-* The prose: summary, notes, warnings, per-plan rationale.
+* CRF is held to the encoder's own legal range and nothing tighter. A number outside it
+  is a broken command; a number inside it is a judgement, and the model is the only
+  party here that has read the film.
+* Presets, tunes and parameter names and ranges come from the real allowlists. A
+  rejected one is reported to the user rather than quietly swapped.
+* The account of the CRF is the model's own labelled factors, and they are checked to
+  add up to the number they claim to explain.
+* Colour and HDR parameters are read off the source file and forced over whatever came
+  back: the model cannot see the file, so it has nothing to contribute and a corrupted
+  ``master-display`` string would silently ruin the encode. ``keyint`` is the one
+  parameter supplied when the model omits it — ten seconds of frames is arithmetic, and
+  a command line that lost its keyframe interval is a worse failure than a convention
+  applied on the model's behalf.
+* Coherence is reported, never overruled: a plan that codes real grain at a CRF too high
+  to carry it gets a warning naming both halves, because that pairing is the commonest
+  way for good reasoning about each setting separately to add up to a bad encode.
 
-What it can never change: the colour and HDR parameters. Those are read off the
-source file, which the model cannot see, so it has nothing to contribute and a
-corrupted ``master-display`` string would silently ruin the encode.
-
-The one thing checked after the fact is coherence, and it is reported rather than
-overruled: a plan that codes real grain at a CRF too high to carry it gets a warning
-naming both halves, because that pairing is the commonest way for good reasoning about
-each setting separately to add up to a bad encode.
-
-Any failure at all — no key, timeout, refusal, truncated JSON, schema mismatch —
-returns the rules engine's proposal with a warning. There is no path where a Gemini
-problem costs the user their advice.
+Any failure at all — no key, timeout, refusal, truncated JSON, an answer with no usable
+plan in it — comes back as a :class:`~app.advice.pipeline.Decision` carrying the reason
+and no advice, and the pipeline falls back to the tables with that reason shown. There is
+no path where a Gemini problem costs the user their settings, and none where it quietly
+half-costs them.
 
 This module has one other job: :meth:`GeminiClient.technical_specs` asks for a film's
 IMDb ``/technical`` rows, because IMDb's WAF means the app cannot read that page
@@ -56,7 +59,14 @@ from typing import Any
 
 import httpx2
 
-from app.advice.rules import REAL_GRAIN_CRF_CEILING, estimate_bitrate
+from app.advice.pipeline import Decision
+from app.advice.rules import (
+    REAL_GRAIN_CRF_CEILING,
+    colour_params,
+    estimate_bitrate,
+    grain_for,
+    keyint_for,
+)
 from app.advice.validate import (
     CRF_LIMITS,
     PROTECTED_PARAMS,
@@ -78,8 +88,11 @@ from app.models import (
     Encoder,
     EncodeRequest,
     EncoderPlan,
+    GrainLevel,
+    GrainProfile,
     SpecsSource,
     TechnicalSpecs,
+    VideoTrack,
 )
 from app.providers import (
     ProviderDisabled,
@@ -96,7 +109,19 @@ MAX_LINE_CHARS = 400
 MAX_NOTES = 8
 MAX_WARNINGS = 6
 MAX_RATIONALE = 6
+MAX_ADJUSTMENTS = 8
+MAX_GRAIN_REASONS = 6
+MAX_LABEL_CHARS = 60
 MAX_OVERVIEW_CHARS = 600
+
+# A CRF account is arithmetic, so it either adds up or it does not; this is the slack
+# allowed for the model writing 0.1 as 0.09999.
+ACCOUNT_TOLERANCE = 0.05
+
+# What a preset falls back to when the model returns one the encoder does not have. Not a
+# proposal — the model was not shown these, and a plan that reaches here has already been
+# reported to the user as having named a preset that does not exist.
+_DEFAULT_PRESET: dict[Encoder, str] = {Encoder.SVT_AV1: "5", Encoder.X265: "slow"}
 
 _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 _CODE_FENCE = re.compile(r"```(?:json)?\s*(?P<body>.*?)```", re.DOTALL)
@@ -121,6 +146,20 @@ _PARAM_SCHEMA: dict[str, Any] = {
     "required": ["name", "value"],
 }
 
+# The account of the CRF, which is printed to the user as a table that has to total.
+_ADJUSTMENT_SCHEMA: dict[str, Any] = {
+    "type": "OBJECT",
+    "properties": {
+        "label": {"type": "STRING", "description": 'Short name, e.g. "2160p starting point"'},
+        "delta": {
+            "type": "NUMBER",
+            "description": "The first factor's whole value; every later one signed",
+        },
+        "detail": {"type": "STRING", "description": "One sentence on why, or omitted"},
+    },
+    "required": ["label", "delta"],
+}
+
 _PLAN_SCHEMA: dict[str, Any] = {
     "type": "OBJECT",
     "properties": {
@@ -131,25 +170,53 @@ _PLAN_SCHEMA: dict[str, Any] = {
             "type": "STRING",
             "description": "x265 tune name, or an empty string. Never set for SVT-AV1.",
         },
-        "params": {"type": "ARRAY", "items": _PARAM_SCHEMA},
+        "params": {
+            "type": "ARRAY",
+            "items": _PARAM_SCHEMA,
+            "description": "Every parameter this encode needs — omitted means absent",
+        },
+        "adjustments": {
+            "type": "ARRAY",
+            "items": _ADJUSTMENT_SCHEMA,
+            "description": "The named factors that sum to crf, in the order you applied them",
+        },
         "rationale": {
             "type": "ARRAY",
             "items": {"type": "STRING"},
-            "description": "Only points the baseline rationale does not already make",
+            "description": "Why these settings, for this film. The only explanation there is.",
         },
     },
-    "required": ["encoder", "crf", "preset", "rationale"],
+    "required": ["encoder", "crf", "preset", "params", "adjustments", "rationale"],
+}
+
+_GRAIN_SCHEMA: dict[str, Any] = {
+    "type": "OBJECT",
+    "properties": {
+        "level": {"type": "STRING", "enum": [level.value for level in GrainLevel]},
+        "confidence": {"type": "NUMBER", "description": "0.0-1.0, honestly"},
+        "origin_format": {
+            "type": "STRING",
+            "description": 'What the picture came off, e.g. "35 mm", "16 mm", "digital"',
+        },
+        "reasons": {
+            "type": "ARRAY",
+            "items": {"type": "STRING"},
+            "description": "The evidence for this level, from the rows and the source parse",
+        },
+    },
+    "required": ["level", "confidence", "reasons"],
 }
 
 RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "OBJECT",
     "properties": {
         "summary": {"type": "STRING", "description": "One sentence on this specific film"},
+        "grain": _GRAIN_SCHEMA,
         "notes": {"type": "ARRAY", "items": {"type": "STRING"}},
         "warnings": {"type": "ARRAY", "items": {"type": "STRING"}},
         "plans": {"type": "ARRAY", "items": _PLAN_SCHEMA},
     },
-    "required": ["summary", "plans"],
+    "required": ["summary", "grain", "plans"],
 }
 
 # One row per TechnicalSpecs field, described by the label IMDb prints above it.
@@ -205,25 +272,20 @@ to be. Do not inflate it.
 
 SYSTEM_PROMPT = f"""\
 You are the video encoding engineer deciding how a film should be re-encoded. You are \
-given the film's production details, IMDb technical rows, a full parse of the user's \
-source file, the user's preferences, and a proposal from a deterministic rules engine.
+given the film's production details, its IMDb technical rows, a full parse of the user's \
+source file, the user's preferences, and a heuristic grain estimate made from those rows.
 
-The proposal is a starting point, not a verdict. It comes from tables keyed on \
-resolution, negative format and release year, and it knows nothing about this film \
-beyond those rows. You do. Decide what this film should actually be encoded with. Where \
-you disagree with the proposal, change it and say why in the rationale — the difference \
-is shown to the user as your adjustment, not hidden. Returning the proposal unchanged is \
-the right answer when it is right, and inventing changes to look useful is not; but do \
-not defer to it out of caution either.
+Nothing else has decided anything. There is no proposal to edit and no default behind \
+you: what you return is what the user encodes with, so every field has to be one you \
+would defend. Decide what this particular film needs, and say why.
 
 Rules you must follow:
 
 1. Return both encoder plans, using the exact encoder ids given.
 2. Put each CRF where this film needs it: {CRF_LIMITS[Encoder.SVT_AV1][0]:g}-\
 {CRF_LIMITS[Encoder.SVT_AV1][1]:g} for SVT-AV1, {CRF_LIMITS[Encoder.X265][0]:g}-\
-{CRF_LIMITS[Encoder.X265][1]:g} for x265. There is no limit on how far you may move it \
-from the proposal. Say what the move costs or saves in size, because the user sees the \
-estimate move with it.
+{CRF_LIMITS[Encoder.X265][1]:g} for x265. Say what the number costs or saves in size, \
+because the user sees an estimate move with it.
 3. Grain and CRF are one decision, not two, and separating them is the failure this tool \
 exists to prevent. Real grain is high-frequency spatial noise, so if you leave it in the \
 picture to be coded — SVT-AV1 film-grain-denoise=0, or x265, which has no synthesis and \
@@ -239,19 +301,34 @@ camera negative, a source already denoised by whoever mastered it — say so in 
 rationale and your numbers stand.
 4. SVT-AV1 presets are integers 0-13 (lower is slower). x265 presets are names: \
 {", ".join(sorted(X265_PRESETS))}. x265 tunes are: {", ".join(sorted(X265_TUNES))}. \
-SVT-AV1 has no named tune — its tune is the numeric `tune` parameter.
+SVT-AV1 has no named tune — its tune is the numeric `tune` parameter, where 0 optimises \
+for how the picture looks and 1 optimises PSNR, which systematically prefers smoothing \
+grain away.
 5. Only these SVT-AV1 parameters exist for you: {", ".join(sorted(SVT_AV1_PARAMS))}.
 6. Only these x265 parameters exist for you: {", ".join(sorted(X265_PARAMS))}.
 7. Do not return colour, HDR, mastering-display or content-light parameters. They are \
 read from the source file and will be overwritten with the file's own values.
-8. Parameters you omit keep their baseline values. You cannot delete a parameter, only \
-change or add one.
-9. Prose must be specific and plain. No marketing adjectives, no restating the \
-baseline's own rationale, no explaining what CRF is. If you have nothing to add for a \
-plan, return an empty rationale list.
-10. Grain is the priority: this tool exists to stop film grain being smoothed into \
-mush. If your suggestion trades grain for size, say so explicitly.
-11. Answer with grain settings, not only a CRF. For a source shot on film, decide and \
+8. **Return the complete parameter set for each encoder.** There is nothing behind your \
+answer: a parameter you omit is absent from the command line, not left at some default \
+someone else chose. That includes the ones that are easy to forget because they are \
+usually just there — keyint, and SVT-AV1's tune. The single exception is rule 7's colour \
+signalling, which is filled in from the file. If you want a feature off, set its off \
+value; omitting it does not turn it off.
+9. Return `adjustments`: the named factors that add up to `crf`. The first is the value \
+you started from, every later one a signed move away from it, and the total must equal \
+`crf`. This is printed to the user as the account of the number — a CRF with no account \
+is a number they cannot argue with — so the labels have to name real reasons \
+("2160p starting point", "35 mm grain", "coded grain ceiling"), not restate the arithmetic.
+10. Return `grain`: the level, what the picture came off, your confidence and the \
+evidence. You are given a heuristic estimate; it is a guess from the technical rows and \
+the source parse, and you may disagree with it — say so in the reasons if you do. When it \
+is marked set_by_user, the level is the user's and is not yours to change.
+11. Prose must be specific and plain. No marketing adjectives, no explaining what CRF is, \
+no restating the numbers you have just given. The rationale is the only explanation the \
+user gets for a plan, so each one needs at least the grain decision and the CRF in it.
+12. Grain is the priority: this tool exists to stop film grain being smoothed into \
+mush. If your settings trade grain for size, say so explicitly.
+13. Answer with grain settings, not only a CRF. For a source shot on film, decide and \
 justify, per encoder:
   - SVT-AV1: the film-grain strength, and above all film-grain-denoise — 1 denoises the \
 picture and replaces its grain with a uniform synthetic field, 0 leaves the real grain \
@@ -265,19 +342,19 @@ enable-tf and tune.
 AQ and rskip — but it does not touch qcomp or the deblocking offsets, so move those \
 yourself if you want them moved. Then aq-mode and aq-strength, sao / selective-sao / \
 limit-sao, strong-intra-smoothing, psy-rd and psy-rdoq, rd and rdoq-level.
-A plan that moves the CRF and nothing else is not an answer for a film source.
-12. Older films need their own answer, and the year alone is not it: stock, dupe \
+A plan that gives a CRF and no grain settings is not an answer for a film source.
+14. Older films need their own answer, and the year alone is not it: stock, dupe \
 negatives and optical printing are what decide the grain. A pre-1970 negative, a \
 blow-up, and anything printed through a dupe carry coarser, higher-contrast grain than a \
 late-1990s camera negative, and older restorations often carry scanner noise and gate \
 weave on top of the real grain. Use the year, country, director and format rows you were \
 given to say which of those this film is, then tune for that case — including whether \
 its grain should be coded or synthesised rather than either by default.
-13. No parameter value may contain a colon. The parameters are joined with ':' into one \
+15. No parameter value may contain a colon. The parameters are joined with ':' into one \
 -svtav1-params / -x265-params string, and a colon inside a value makes the encoder read \
 the far half as a parameter name and drop the one after it. Write deblock=-1, which x265 \
 applies to both offsets, never deblock=-1:-1.
-14. If the source looks like a bad candidate for re-encoding at all, put that in \
+16. If the source looks like a bad candidate for re-encoding at all, put that in \
 warnings rather than quietly encoding it anyway.
 """
 
@@ -373,13 +450,13 @@ def _uses_synthesis(plan: EncoderPlan) -> bool:
 
 
 class GeminiClient:
-    """Structured encoding advice from Gemini, validated against the baseline."""
+    """The settings, decided by Gemini and validated before they reach a command line."""
 
     def __init__(self, settings: Settings, *, client: httpx2.AsyncClient | None = None) -> None:
         self._settings = settings
         self._client = client
-        # The API payload is cached, not the merged Advice: Advice objects are mutated
-        # downstream (commands are attached to their plans), so they must not be shared.
+        # The API payload is cached, not the Advice built from it: Advice objects are
+        # mutated downstream (commands are attached to their plans), so must not be shared.
         self._cache: TTLCache[dict[str, Any]] = TTLCache(
             ttl_seconds=float(settings.cache_ttl_seconds)
         )
@@ -388,27 +465,23 @@ class GeminiClient:
     def enabled(self) -> bool:
         return self._settings.gemini_enabled
 
-    async def annotate(self, request: EncodeRequest, baseline: Advice) -> Advice:
-        """Return the baseline reviewed by Gemini, or the baseline plus a warning.
+    async def decide(self, request: EncodeRequest) -> Decision:
+        """The settings Gemini decided on, or the reason there are none.
 
-        Never raises. A model that is unreachable, unhelpful or wrong costs the user
-        nothing except the annotation they were hoping for.
+        Never raises. A model that is unreachable, unhelpful or wrong costs the user the
+        decision they were hoping for and nothing else: the pipeline falls back to the
+        tables and shows the sentence returned here alongside them.
         """
         if not self.enabled:
-            return baseline
+            return Decision()
 
         try:
-            payload = await self._advice_payload(request, baseline)
+            payload = await self._advice_payload(request)
         except ProviderUnavailable as exc:
-            reviewed = baseline.model_copy(deep=True)
             detail = f" ({exc.detail})" if exc.detail else ""
-            reviewed.warnings.append(
-                f"{exc.message}{detail} The settings below are the deterministic "
-                "baseline, which is complete on its own."
-            )
-            return reviewed
+            return Decision(problem=f"{exc.message}{detail}")
 
-        return merge_advice(baseline, payload, request)
+        return advice_from(payload, request)
 
     async def technical_specs(
         self, imdb_id: str, *, title: str | None = None, year: int | None = None
@@ -477,8 +550,8 @@ class GeminiClient:
             ),
         )
 
-    async def _advice_payload(self, request: EncodeRequest, baseline: Advice) -> dict[str, Any]:
-        context = build_context(request, baseline)
+    async def _advice_payload(self, request: EncodeRequest) -> dict[str, Any]:
+        context = build_context(request)
         body = json.dumps(context, sort_keys=True, ensure_ascii=False)
         key = hashlib.sha256(
             f"{self._settings.gemini_model}|{self._settings.gemini_temperature}|{body}".encode()
@@ -653,50 +726,39 @@ _SPECS_PROVENANCE: dict[SpecsSource | None, str] = {
 }
 
 
-def build_context(request: EncodeRequest, baseline: Advice) -> dict[str, Any]:
+def build_context(request: EncodeRequest) -> dict[str, Any]:
     """The facts the model decides on. Compact on purpose: no keys, no paths, no filenames.
 
     Everything known about the film, its negative and the source file goes in, because
-    the model is the one weighing them against each other. The input path is deliberately
-    excluded — it is a local filesystem path that the model has no use for and no
-    business seeing.
+    the model is the one weighing them against each other. Two things stay out. The input
+    path is a local filesystem path the model has no use for and no business seeing. And
+    there is no plan in here: a proposal to react to is an anchor, and the whole point of
+    this call is that the decision has not been made yet.
 
-    The rules engine's plan goes in under ``proposal``, named that way on purpose: it is
-    what the tables produced, not what the answer has to be.
+    The grain estimate is the one thing that looks like an answer, and it is labelled as
+    the guess it is — the model is free to disagree with it, and told so.
     """
+    grain = grain_for(request)
     context: dict[str, Any] = {
         "preferences": {"speed": request.speed.value, "size": request.size.value},
         "grain_estimate": {
-            "level": baseline.grain.level.value,
-            "confidence": round(baseline.grain.confidence, 2),
-            "origin_format": baseline.grain.origin_format,
+            "made_by": (
+                "heuristic over the technical rows and the source parse — a guess to "
+                "weigh, not a decision"
+            ),
+            "level": grain.level.value,
+            "confidence": round(grain.confidence, 2),
+            "origin_format": grain.origin_format,
             # Spelled out rather than left to be inferred from origin_format, because
             # the grain rules the model is asked to follow all hinge on it.
-            "photochemical": baseline.grain.is_photochemical,
-            "reasons": baseline.grain.reasons,
-            "set_by_user": baseline.grain.user_override,
+            "photochemical": grain.is_photochemical,
+            "reasons": grain.reasons,
+            "set_by_user": grain.user_override,
         },
-        "proposal": {
-            "made_by": "deterministic rules engine — tables only, has not read this film",
-            "plans": [
-                {
-                    "encoder": plan.encoder.value,
-                    "crf": plan.crf,
-                    "preset": plan.preset,
-                    "tune": plan.tune,
-                    "params": plan.params,
-                    "rationale": plan.rationale,
-                    "estimated_bitrate_bps": plan.estimated_bitrate_bps,
-                }
-                for plan in baseline.plans
-            ],
-            "notes": baseline.notes,
-            "warnings": baseline.warnings,
-            # Stated rather than enforced: the rules engine holds itself to this, and the
-            # model is told the number so it can decide with it instead of tripping over
-            # it. A plan that goes above it and says why is accepted as it stands.
-            "svt_av1_real_grain_crf_ceiling": REAL_GRAIN_CRF_CEILING,
-        },
+        # Stated rather than enforced: the model is told the number so it can decide with
+        # it instead of tripping over it. A plan that goes above it and says why in the
+        # rationale is accepted as it stands, with a warning naming both halves.
+        "limits": {"svt_av1_real_grain_crf_ceiling": REAL_GRAIN_CRF_CEILING},
     }
 
     if (movie := request.movie) is not None:
@@ -760,6 +822,9 @@ def build_context(request: EncodeRequest, baseline: Advice) -> dict[str, Any]:
             "hdr10_plus": video.hdr10_plus,
             "has_mastering_display": video.mastering_display is not None,
             "max_cll": video.max_cll,
+            # The model sets keyint itself, so it is given the convention rather than
+            # left to work out ten seconds of frames from the frame rate.
+            "ten_second_keyframe_interval": keyint_for(video),
         }
     if media.audio:
         source["audio"] = [
@@ -779,52 +844,63 @@ def build_context(request: EncodeRequest, baseline: Advice) -> dict[str, Any]:
     return context
 
 
-# --- merging ----------------------------------------------------------------
+# --- building the advice ----------------------------------------------------
+
+NO_USABLE_PLAN = (
+    "Gemini's answer had no usable encoder plan in it, so it decided nothing for this film."
+)
 
 
-def merge_advice(baseline: Advice, payload: dict[str, Any], request: EncodeRequest) -> Advice:
-    """Fold a validated model payload into the baseline. Never raises."""
-    reviewed = baseline.model_copy(deep=True)
+def advice_from(payload: dict[str, Any], request: EncodeRequest) -> Decision:
+    """Build the advice out of a model payload alone. Never raises.
+
+    Every field comes from the answer. Nothing is inherited, defaulted from a table or
+    merged with anything, and where the answer is unusable the fact is reported rather
+    than papered over: a rejected preset or parameter goes to ``rejected_flags`` and is
+    shown to the user, and an answer with no usable plan in it at all is returned as a
+    problem, so the pipeline falls back to the tables *visibly* instead of blending them
+    in field by field.
+    """
     rejected: list[str] = []
+    grain = _grain_from(payload.get("grain"), request, rejected)
 
-    if (summary := _prose(payload.get("summary"), MAX_SUMMARY_CHARS)) is not None:
-        reviewed.summary = summary
-
-    reviewed.notes.extend(
-        _lines(
-            payload.get("notes"),
-            limit=MAX_NOTES,
-            seen={line.casefold() for line in reviewed.notes},
-        )
-    )
-    reviewed.warnings.extend(
-        _lines(
-            payload.get("warnings"),
-            limit=MAX_WARNINGS,
-            seen={line.casefold() for line in reviewed.warnings},
-        )
-    )
-
-    handled: set[Encoder] = set()
+    decided: dict[Encoder, EncoderPlan] = {}
     for raw in _as_list(payload.get("plans")):
         row = _as_dict(raw)
         encoder = _encoder_from(row.get("encoder"))
         if encoder is None:
             rejected.append(f"a plan for unknown encoder {row.get('encoder')!r}")
             continue
-        if encoder in handled:
+        if encoder in decided:
             rejected.append(f"a second {encoder.value} plan")
             continue
-        plan = reviewed.plan_for(encoder)
-        if plan is None:
-            rejected.append(f"a {encoder.value} plan the baseline does not have")
-            continue
-        handled.add(encoder)
-        rejected.extend(_apply_plan(plan, row, baseline, request, reviewed.warnings))
+        if (plan := _plan_from(encoder, row, request, grain, rejected)) is not None:
+            decided[encoder] = plan
 
-    reviewed.source = AdviceSource.GEMINI
-    reviewed.rejected_flags = rejected
-    return reviewed
+    if not decided:
+        return Decision(problem=NO_USABLE_PLAN)
+
+    # Declaration order, not the order the model happened to answer in, so the page and
+    # the report put the two encoders in the same places from one run to the next.
+    plans = [decided[encoder] for encoder in Encoder if encoder in decided]
+    rejected.extend(f"no {e.value} plan in the answer" for e in Encoder if e not in decided)
+
+    warnings = _lines(payload.get("warnings"), limit=MAX_WARNINGS, seen=set())
+    for plan in plans:
+        if (complaint := _starved_grain(plan)) is not None:
+            warnings.append(complaint)
+
+    return Decision(
+        advice=Advice(
+            source=AdviceSource.GEMINI,
+            grain=grain,
+            plans=plans,
+            summary=_prose(payload.get("summary"), MAX_SUMMARY_CHARS),
+            notes=_lines(payload.get("notes"), limit=MAX_NOTES, seen=set()),
+            warnings=warnings,
+            rejected_flags=rejected,
+        )
+    )
 
 
 def _encoder_from(value: object) -> Encoder | None:
@@ -843,90 +919,181 @@ def _encoder_from(value: object) -> Encoder | None:
     return aliases.get(candidate)
 
 
-def _apply_plan(
-    plan: EncoderPlan,
+def _plan_from(
+    encoder: Encoder,
     row: dict[str, Any],
-    baseline: Advice,
     request: EncodeRequest,
-    warnings: list[str],
-) -> list[str]:
-    """Validate one model plan onto the proposal it answers, in place."""
-    rejected: list[str] = []
-    encoder = plan.encoder
-    original_crf = plan.crf
+    grain: GrainProfile,
+    rejected: list[str],
+) -> EncoderPlan | None:
+    """One validated plan, or ``None`` if there is no plan here to validate.
 
+    A CRF is the one field with nothing sensible to fall back on: a preset or a parameter
+    the encoder refuses can be reported and dropped, but a plan with no number in it is
+    not a plan, and inventing one would be exactly the table-shaped guess this module
+    stopped making.
+    """
     raw_crf = row.get("crf")
-    if isinstance(raw_crf, int | float) and not isinstance(raw_crf, bool):
-        crf, complaint = validate_crf(encoder, float(raw_crf))
-        if complaint:
-            rejected.append(complaint)
-        plan.crf = crf
-    elif raw_crf is not None:
-        rejected.append(f"CRF {raw_crf!r} (not a number)")
+    if not isinstance(raw_crf, int | float) or isinstance(raw_crf, bool):
+        rejected.append(f"the {encoder.value} plan, whose CRF was {raw_crf!r} and not a number")
+        return None
 
-    if (raw_preset := row.get("preset")) is not None:
-        preset, complaint = validate_preset(encoder, str(raw_preset), plan.preset)
-        if complaint:
-            rejected.append(complaint)
-        plan.preset = preset
+    crf, complaint = validate_crf(encoder, float(raw_crf))
+    clamped = complaint is not None
+    if complaint:
+        rejected.append(complaint)
 
-    if "tune" in row:
-        tune, complaint = validate_tune(encoder, row.get("tune"))
-        if complaint:
-            rejected.append(complaint)
-        # An x265 tune of None means the model explicitly cleared it, which is a
-        # legitimate call — grain tuning is not always right.
-        elif encoder is Encoder.X265:
-            plan.tune = tune
+    preset, complaint = validate_preset(
+        encoder, str(row.get("preset", "")), _DEFAULT_PRESET[encoder]
+    )
+    if complaint:
+        rejected.append(complaint)
+
+    tune, complaint = validate_tune(encoder, row.get("tune"))
+    if complaint:
+        rejected.append(complaint)
 
     result = validate_params(encoder, _params_from_pairs(row.get("params")))
     rejected.extend(result.rejected)
-    plan.params.update(result.params)
 
-    # The source's own colour signalling always wins: the model has not seen the file.
-    if (baseline_plan := baseline.plan_for(encoder)) is not None:
-        for name in PROTECTED_PARAMS[encoder]:
-            if name in baseline_plan.params:
-                plan.params[name] = baseline_plan.params[name]
-            else:
-                plan.params.pop(name, None)
-
-    plan.rationale.extend(
-        _lines(
-            row.get("rationale"),
-            limit=MAX_RATIONALE,
-            seen={line.casefold() for line in plan.rationale},
-        )
+    plan = EncoderPlan(
+        encoder=encoder,
+        crf=crf,
+        preset=preset,
+        # SVT-AV1's tune is the numeric parameter, so a name there is never carried.
+        tune=tune if encoder is Encoder.X265 else None,
+        params=_file_derived(encoder, result.params, request.source.video),
+        adjustments=_adjustments_from(
+            row.get("adjustments"), encoder, crf, clamped=clamped, rejected=rejected
+        ),
+        rationale=_lines(row.get("rationale"), limit=MAX_RATIONALE, seen=set()),
     )
+    plan.estimated_bitrate_bps = estimate_bitrate(
+        encoder, crf, request.source.video, grain.level, synthesised=_uses_synthesis(plan)
+    )
+    return plan
 
-    if abs(plan.crf - original_crf) >= 0.01:
-        plan.adjustments.append(
+
+def _file_derived(
+    encoder: Encoder, params: dict[str, str], video: VideoTrack | None
+) -> dict[str, str]:
+    """The model's parameters, with the two things it could not know put in.
+
+    Colour and HDR signalling is read off the source and forced over whatever came back:
+    the model has not seen the file, so a value it returned there is a guess at best and
+    a corrupted ``master-display`` string at worst, and either silently ruins the encode.
+
+    ``keyint`` is the one parameter supplied when the model left it out. Ten seconds of
+    frames is arithmetic on the frame rate rather than a judgement, and a command line
+    with no keyframe interval in it is a worse failure than a convention applied on the
+    model's behalf. Nothing else is defaulted — an omitted parameter is an absent one.
+    """
+    settled = dict(params)
+    for name in PROTECTED_PARAMS[encoder]:
+        settled.pop(name, None)
+    settled.update(colour_params(encoder, video))
+    settled.setdefault("keyint", str(keyint_for(video)))
+    return settled
+
+
+def _adjustments_from(
+    value: object,
+    encoder: Encoder,
+    crf: float,
+    *,
+    clamped: bool,
+    rejected: list[str],
+) -> list[Adjustment]:
+    """The model's own account of its CRF, checked to add up to the number it explains.
+
+    The user is shown these as a table that totals to the final CRF, so factors that do
+    not add up are not a rounding curiosity — they are a table that reads as broken. The
+    difference is shown as its own row rather than absorbed anywhere: when the CRF was
+    clamped to the encoder's range, that row is the true reason and says so; otherwise
+    the model's arithmetic slipped, and the row and a rejection both say that instead.
+    """
+    factors: list[Adjustment] = []
+    for entry in _as_list(value):
+        row = _as_dict(entry)
+        delta = row.get("delta")
+        label = _prose(row.get("label"), MAX_LABEL_CHARS)
+        if label is None or not isinstance(delta, int | float) or isinstance(delta, bool):
+            continue
+        factors.append(
+            Adjustment(label=label, delta=round(float(delta), 1), detail=_prose(row.get("detail")))
+        )
+        if len(factors) >= MAX_ADJUSTMENTS:
+            break
+
+    if not factors:
+        rejected.append(f"the {encoder.value} plan's account of its CRF — no usable factors")
+        return [Adjustment(label="Gemini's CRF for this film", delta=crf, detail=None)]
+
+    residual = round(crf - sum(factor.delta for factor in factors), 1)
+    if abs(residual) < ACCOUNT_TOLERANCE:
+        return factors
+
+    if clamped:
+        low, high = CRF_LIMITS[encoder]
+        factors.append(
             Adjustment(
-                label="Gemini",
-                delta=round(plan.crf - original_crf, 1),
-                detail="Gemini's adjustment for this particular film.",
+                label=f"held to {encoder.value}'s range",
+                delta=residual,
+                detail=f"{encoder.value} only takes a CRF between {low:g} and {high:g}.",
             )
         )
-        plan.estimated_bitrate_bps = estimate_bitrate(
-            encoder,
-            plan.crf,
-            request.source.video,
-            baseline.grain.level,
-            synthesised=_uses_synthesis(plan),
+    else:
+        rejected.append(
+            f"the {encoder.value} plan's account of its CRF — the factors came to "
+            f"{crf - residual:g}, not the {crf:g} it asked for"
         )
-    elif _uses_synthesis(plan) != _uses_synthesis_of(baseline, encoder):
-        plan.estimated_bitrate_bps = estimate_bitrate(
-            encoder,
-            plan.crf,
-            request.source.video,
-            baseline.grain.level,
-            synthesised=_uses_synthesis(plan),
+        factors.append(
+            Adjustment(
+                label="unaccounted for",
+                delta=residual,
+                detail="Gemini's own factors did not add up to its CRF; this is the difference.",
+            )
         )
+    return factors
 
-    if (complaint := _starved_grain(plan)) is not None:
-        warnings.append(complaint)
 
-    return rejected
+def _grain_from(value: object, request: EncodeRequest, rejected: list[str]) -> GrainProfile:
+    """The grain profile the model settled on — unless the user set the level by hand.
+
+    A hand-set level is not the model's to revisit, so that case returns the estimate
+    whole (which already reports itself as an override at full confidence). Otherwise
+    everything here is the model's, with one exception: ``origin_format`` falls back to
+    the estimate's, because that comes off the negative-format row rather than out of a
+    table, and losing it would quietly reclassify a film source as maybe-digital and
+    suppress the grain handling this tool exists for.
+    """
+    estimate = grain_for(request)
+    if estimate.user_override:
+        return estimate
+
+    row = _as_dict(value)
+    raw_level = row.get("level")
+    level = _GRAIN_LEVELS.get(str(raw_level).strip().casefold())
+    if level is None:
+        rejected.append(f"grain level {raw_level!r}, so the heuristic estimate stands")
+        level = estimate.level
+
+    raw_confidence = row.get("confidence")
+    confidence = (
+        max(0.0, min(float(raw_confidence), 1.0))
+        if isinstance(raw_confidence, int | float) and not isinstance(raw_confidence, bool)
+        else estimate.confidence
+    )
+
+    return GrainProfile(
+        level=level,
+        confidence=round(confidence, 2),
+        reasons=_lines(row.get("reasons"), limit=MAX_GRAIN_REASONS, seen=set()),
+        origin_format=_prose(row.get("origin_format"), MAX_LABEL_CHARS) or estimate.origin_format,
+    )
+
+
+_GRAIN_LEVELS: dict[str, GrainLevel] = {level.value: level for level in GrainLevel}
 
 
 def _starved_grain(plan: EncoderPlan) -> str | None:
@@ -956,15 +1123,10 @@ def _starved_grain(plan: EncoderPlan) -> str | None:
     )
 
 
-def _uses_synthesis_of(advice: Advice, encoder: Encoder) -> bool:
-    plan = advice.plan_for(encoder)
-    return _uses_synthesis(plan) if plan is not None else False
-
-
 __all__ = [
     "RESPONSE_SCHEMA",
     "SYSTEM_PROMPT",
     "GeminiClient",
+    "advice_from",
     "build_context",
-    "merge_advice",
 ]

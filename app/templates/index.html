@@ -26,8 +26,8 @@
   </form>
   {% if not capabilities.tmdb_search %}
     <p class="muted">
-      No <code>TMDB_API_KEY</code> is set, so search is off. The deterministic rules
-      still work — you will just have to set the grain level by hand.
+      No <code>TMDB_API_KEY</code> is set, so search is off. Everything else works —
+      you will just have to set the grain level by hand.
     </p>
   {% endif %}
 </section>
@@ -39,18 +39,18 @@
   <h2>Configuration</h2>
   <ul class="capabilities">
     <li class="{{ 'on' if capabilities.baseline_rules else 'off' }}">
-      <strong>Baseline rules</strong>
-      <span>always available — no keys, no network</span>
+      <strong>Table fallback</strong>
+      <span>always available — no keys, no network, and it has not read your film</span>
     </li>
     <li class="{{ 'on' if capabilities.tmdb_search else 'off' }}">
       <strong>TMDB search</strong>
       <span>{{ "configured" if capabilities.tmdb_search else "set TMDB_API_KEY to enable" }}</span>
     </li>
     <li class="{{ 'on' if capabilities.gemini_advice else 'off' }}">
-      <strong>Gemini advice</strong>
+      <strong>Gemini decides</strong>
       <span>
         {{ "configured" if capabilities.gemini_advice
-           else "set GEMINI_API_KEY to enable (baseline rules still work without it)" }}
+           else "set GEMINI_API_KEY to enable — without it you get the table fallback" }}
       </span>
     </li>
     <li class="{{ 'on' if capabilities.imdb_technical_lookup else 'off' }}">
