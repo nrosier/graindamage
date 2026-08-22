@@ -13,6 +13,13 @@ what was ignored rather than silently disagreeing with the model.
 Values are also character-restricted. Commands are built with :func:`shlex.join`, so
 this is defence in depth rather than the only barrier — but a parameter value has no
 legitimate reason to contain a backtick.
+
+Colons are barred for a plainer reason: :attr:`EncoderPlan.params_string` joins the
+parameters with ``:`` into the one string that ``-x265-params``, ``-svtav1-params`` and
+HandBrake's ``--encopts`` take. A colon inside a value does not merely fail — libx265
+reads the far half as a parameter name (``Unknown option: -1:sao``) and silently drops
+whatever came after it. No parameter allowed below needs one; ``deblock`` takes a single
+value that x265 applies to both offsets.
 """
 
 from __future__ import annotations
@@ -23,8 +30,8 @@ from dataclasses import dataclass
 from app.models import Encoder
 from app.sources.colors import CODE_BY_MATRIX, CODE_BY_PRIMARIES, CODE_BY_TRANSFER
 
-# Every legitimate encoder parameter value is made of these.
-_SAFE_VALUE = re.compile(r"^[A-Za-z0-9_.,:()+/=-]{1,120}$")
+# Every legitimate encoder parameter value is made of these — note the absent colon.
+_SAFE_VALUE = re.compile(r"^[A-Za-z0-9_.,()+/=-]{1,120}$")
 _SAFE_NAME = re.compile(r"^[a-z][a-z0-9-]{0,40}$")
 
 MAX_PARAMS = 40
@@ -85,6 +92,15 @@ _LIGHT_LEVEL = Pattern(re.compile(r"\d{1,6},\d{1,6}"))
 
 # --- SVT-AV1 ----------------------------------------------------------------
 
+# Ranges below were read off SVT-AV1 4.2.0's own refusals, not off a wiki. Two
+# absences are deliberate:
+#
+# * ``enable-hdr`` does not exist — SVT-AV1 answers "Error parsing option enable-hdr",
+#   exactly as it does for an invented key. HDR is signalled through
+#   ``mastering-display``, ``content-light`` and the three colour parameters.
+# * ``tune`` stops at 2 although 3-5 parse. Tune 3 (IQ) aborts outright on a
+#   random-access encode, and tune 5 (VMAF) unsharp-masks the input, which is the
+#   opposite of what this tool is for.
 SVT_AV1_PARAMS: dict[str, Rule] = {
     "tune": IntRange(0, 2),
     "keyint": IntRange(-2, 10_000),
@@ -93,6 +109,7 @@ SVT_AV1_PARAMS: dict[str, Rule] = {
     "film-grain-denoise": _BOOL,
     "aq-mode": IntRange(0, 2),
     "enable-tf": IntRange(0, 2),
+    "tf-strength": IntRange(0, 4),
     "enable-overlays": _BOOL,
     "enable-dlf": IntRange(0, 2),
     "enable-cdef": _BOOL,
@@ -101,6 +118,14 @@ SVT_AV1_PARAMS: dict[str, Rule] = {
     "qm-min": IntRange(0, 15),
     "qm-max": IntRange(0, 15),
     "sharpness": IntRange(-7, 7),
+    # The grain-relevant rate-control knobs: how flat the QP scale is between temporal
+    # layers, how much extra goes to dark frames, and the variance-boost family.
+    "qp-scale-compress-strength": IntRange(0, 3),
+    "luminance-qp-bias": IntRange(0, 100),
+    "enable-variance-boost": _BOOL,
+    "variance-boost-strength": IntRange(1, 4),
+    "variance-octile": IntRange(1, 8),
+    "variance-boost-curve": IntRange(0, 2),
     "irefresh-type": IntRange(1, 2),
     "lookahead": IntRange(-1, 120),
     "lp": IntRange(0, 128),
@@ -144,7 +169,9 @@ X265_PARAMS: dict[str, Rule] = {
     "me": IntRange(0, 5),
     "subme": IntRange(0, 7),
     "merange": IntRange(0, 32_768),
-    "deblock": Pattern(re.compile(r"-?\d{1,2}:-?\d{1,2}")),
+    # One number, applied to both the tC and beta offsets. The two-value "-1:-1" form
+    # cannot be used here: see the colon note in this module's docstring.
+    "deblock": IntRange(-6, 6),
     "sao": _BOOL,
     "limit-sao": _BOOL,
     "selective-sao": IntRange(0, 4),

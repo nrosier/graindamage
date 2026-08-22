@@ -290,20 +290,84 @@ def test_svt_av1_always_tunes_for_subjective_quality() -> None:
     assert svt.params["scd"] == "1"
 
 
-def test_film_grain_synthesis_is_only_used_where_grain_dominates() -> None:
+def test_synthesis_is_a_floor_until_grain_becomes_the_image() -> None:
+    light, _ = plans(grain_override=GrainLevel.LIGHT)
     moderate, _ = plans(grain_override=GrainLevel.MODERATE)
     heavy, _ = plans(grain_override=GrainLevel.HEAVY)
     extreme, _ = plans(grain_override=GrainLevel.EXTREME)
 
-    assert "film-grain" not in moderate.params
-    assert any("No film-grain synthesis" in reason for reason in moderate.rationale)
+    # Below heavy the film's own grain is still coded, and synthesis only fills in what
+    # the quantiser flattened — which is what film-grain-denoise=0 buys.
+    assert (light.params["film-grain"], light.params["film-grain-denoise"]) == ("4", "0")
+    assert (moderate.params["film-grain"], moderate.params["film-grain-denoise"]) == ("8", "0")
+    # At these levels grain *is* the image, so it is removed, coded clean, and put back.
+    assert (heavy.params["film-grain"], heavy.params["film-grain-denoise"]) == ("12", "1")
+    assert (extreme.params["film-grain"], extreme.params["film-grain-denoise"]) == ("20", "1")
 
-    assert heavy.params["film-grain"] == "12"
-    assert heavy.params["film-grain-denoise"] == "1"
-    assert extreme.params["film-grain"] == "20"
-    # The double-grain trap is worth a sentence: denoise off *and* film-grain on
-    # gives coded grain with synthesised grain laid over it.
-    assert any("film-grain-denoise=0" in reason for reason in heavy.rationale)
+    assert any("film-grain-denoise=0" in reason for reason in moderate.rationale)
+    assert any("film-grain-denoise=1" in reason for reason in heavy.rationale)
+
+
+def test_no_synthetic_grain_over_a_source_that_may_not_have_any() -> None:
+    digital, _ = plans(specs=specs(negative_formats=["Digital"], cinematographic_processes=[]))
+    assert "film-grain" not in digital.params
+
+    # Light grain, but nothing said whether it came off a negative: adding grain here
+    # would be inventing it.
+    undecided = build_advice(request_for(movie=None, specs=specs_with_nothing()))
+    svt = undecided.plan_for(Encoder.SVT_AV1)
+    assert svt is not None
+    assert undecided.grain.level is GrainLevel.LIGHT
+    assert "film-grain" not in svt.params
+
+    # A level set by hand does count as film: the user is saying there is grain to keep.
+    forced, _ = plans(specs=specs_with_nothing(), grain_override=GrainLevel.MODERATE)
+    assert forced.params["film-grain"] == "8"
+
+
+def test_loop_restoration_is_off_only_where_the_real_grain_is_coded() -> None:
+    moderate, _ = plans(grain_override=GrainLevel.MODERATE)
+    heavy, _ = plans(grain_override=GrainLevel.HEAVY)
+
+    assert moderate.params["enable-restoration"] == "0"
+    # Denoised first, so there is no grain left for the Wiener filter to eat.
+    assert "enable-restoration" not in heavy.params
+
+
+def test_film_grain_never_lands_above_the_preset_svt_av1_warns_about() -> None:
+    uhd = media(video=video_track(width=3840, height=2160))
+    grainy, _ = plans(source=uhd, speed=SpeedPreference.FAST, grain_override=GrainLevel.HEAVY)
+    clean, _ = plans(
+        source=uhd,
+        speed=SpeedPreference.FAST,
+        specs=specs(negative_formats=["Digital"], cinematographic_processes=[]),
+    )
+
+    # preset 6 for fast, +1 for 2160p — but SVT-AV1 calls film-grain above 6 a
+    # debugging-only compute overhead, and the grain matters more than the last step.
+    assert grainy.params["film-grain"] == "12"
+    assert grainy.preset == "6"
+    assert any("preset 6" in reason for reason in grainy.rationale)
+    # Nothing to protect, nothing to cap.
+    assert clean.preset == "7"
+
+
+def test_the_size_estimate_only_falls_where_the_grain_is_really_removed() -> None:
+    moderate, _ = plans(grain_override=GrainLevel.MODERATE)
+    heavy, _ = plans(grain_override=GrainLevel.HEAVY)
+    assert moderate.estimated_bitrate_bps and heavy.estimated_bitrate_bps
+
+    # Heavier grain, same CRF, yet a smaller estimate — because heavy is denoised and
+    # re-synthesised, while moderate still codes every particle.
+    assert heavy.crf == moderate.crf
+    assert heavy.estimated_bitrate_bps < moderate.estimated_bitrate_bps
+    assert moderate.estimated_bitrate_bps == estimate_bitrate(
+        Encoder.SVT_AV1,
+        moderate.crf,
+        video_track(),
+        GrainLevel.MODERATE,
+        synthesised=False,
+    )
 
 
 def test_x265_tunes_for_grain_from_moderate_upwards() -> None:
@@ -325,6 +389,55 @@ def test_x265_tunes_for_grain_from_moderate_upwards() -> None:
     assert "sao" not in moderate_x265.params
 
     assert heavy_x265.params["aq-strength"] == "0.8"
+
+
+def test_the_two_things_tune_grain_does_not_do_are_set_by_hand() -> None:
+    _, moderate_x265 = plans(grain_override=GrainLevel.MODERATE)
+
+    # Measured against x265 4.2: tune grain leaves qcomp at 0.60 and the deblocking
+    # offsets at 0:0, whatever its reputation says.
+    assert moderate_x265.params["qcomp"] == "0.8"
+    # One value, not "-1:-1" — params_string joins on ':', and libx265 would read the
+    # second half as a parameter name and drop the parameter after it.
+    assert moderate_x265.params["deblock"] == "-1"
+    # The whole string has to survive the join: one "=" per colon-separated segment.
+    assert all(part.count("=") == 1 for part in moderate_x265.params_string.split(":"))
+    assert moderate_x265.params["strong-intra-smoothing"] == "0"
+    assert not any("raises qcomp" in reason for reason in moderate_x265.rationale)
+    assert any("psy-rdoq to 10" in reason for reason in moderate_x265.rationale)
+
+
+def test_a_coarse_stock_negative_is_tuned_harder_than_a_late_one() -> None:
+    old_svt, old_x265 = plans(movie=movie(year=1962))
+    late_svt, late_x265 = plans(movie=movie(year=1998))
+
+    # The era moves the tuning, not the grain level, so the CRF ladder is untouched.
+    assert old_svt.crf == late_svt.crf
+    assert old_svt.params["film-grain"] == "12"
+    assert late_svt.params["film-grain"] == "8"
+    assert old_svt.params["qp-scale-compress-strength"] == "2"
+    assert "qp-scale-compress-strength" not in late_svt.params
+    assert (old_x265.params["qcomp"], old_x265.params["deblock"]) == ("0.85", "-2")
+    assert (late_x265.params["qcomp"], late_x265.params["deblock"]) == ("0.8", "-1")
+    assert any("1962" in reason for reason in old_svt.rationale)
+
+
+def test_the_era_ladder_works_from_a_parsed_year_alone() -> None:
+    svt, x265 = plans(movie=None, fallback_year=1965)
+
+    assert svt.params["qp-scale-compress-strength"] == "2"
+    assert x265.params["deblock"] == "-2"
+
+
+def test_a_digital_film_gets_no_era_tuning_whatever_its_year() -> None:
+    # Nothing here is photochemical, so "old" says nothing about grain.
+    svt, x265 = plans(
+        movie=movie(year=1968),
+        specs=specs(negative_formats=["Digital"], cinematographic_processes=[]),
+    )
+
+    assert "qp-scale-compress-strength" not in svt.params
+    assert "qcomp" not in x265.params
 
 
 def test_sdr_colour_signalling_reaches_both_encoders_in_their_own_dialect() -> None:

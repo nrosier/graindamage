@@ -140,6 +140,7 @@ def test_the_context_carries_the_film_and_the_baseline() -> None:
     assert context["film"]["directors"] == ["Ridley Scott"]
     assert context["grain_estimate"]["level"] == "moderate"
     assert context["grain_estimate"]["origin_format"] == "Super 35 mm"
+    assert context["grain_estimate"]["photochemical"] is True
     assert context["grain_estimate"]["set_by_user"] is False
     assert context["imdb_technical"]["negative_formats"] == ["35 mm"]
     assert context["preferences"] == {"speed": "balanced", "size": "balanced"}
@@ -181,6 +182,18 @@ def test_absent_facts_are_omitted_rather_than_sent_as_null() -> None:
     assert "imdb_technical" not in context
     assert "video" not in context["source"]
     assert "audio" not in context["source"]
+    assert "release_year" not in context
+
+
+def test_a_parsed_year_reaches_the_model_when_no_film_was_looked_up() -> None:
+    # Without a TMDB key the CLI has only the year in the filename, and that year is
+    # the whole input to the older-film half of the grain rules.
+    advice, request = baseline(movie=None, fallback_year=1962)
+
+    context = build_context(request, advice)
+
+    assert "film" not in context
+    assert context["release_year"] == 1962
 
 
 def test_a_long_overview_is_truncated() -> None:
@@ -222,6 +235,32 @@ def test_the_system_prompt_states_the_limits_it_will_be_held_to() -> None:
     assert "slower" in SYSTEM_PROMPT  # the x265 preset ladder
     assert "film-grain" in SYSTEM_PROMPT  # the SVT-AV1 parameter allowlist
     assert "will be overwritten with the file's own values" in SYSTEM_PROMPT
+    # Every value ends up in one colon-joined string, so the model has to know.
+    assert "never deblock=-1:-1" in SYSTEM_PROMPT
+
+
+def test_the_system_prompt_asks_for_grain_tuning_and_not_only_a_crf() -> None:
+    # The complaint this answers: the model returned CRF opinions and no grain
+    # parameters at all, so nothing it said reached -svtav1-params.
+    assert "film-grain-denoise" in SYSTEM_PROMPT
+    assert "not an answer for a film source" in SYSTEM_PROMPT
+    for knob in (
+        "enable-restoration",
+        "qp-scale-compress-strength",
+        "luminance-qp-bias",
+        "variance-boost-strength",
+        "strong-intra-smoothing",
+        "psy-rdoq",
+    ):
+        assert knob in SYSTEM_PROMPT, knob
+    # And what tune grain leaves alone, because assuming otherwise is the usual error.
+    assert "does not touch qcomp" in SYSTEM_PROMPT
+
+
+def test_the_system_prompt_asks_for_the_older_film_case_specifically() -> None:
+    assert "pre-1970" in SYSTEM_PROMPT
+    assert "dupe" in SYSTEM_PROMPT
+    assert "the year alone is not it" in SYSTEM_PROMPT
 
 
 # --- merging ----------------------------------------------------------------

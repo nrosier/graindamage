@@ -18,6 +18,7 @@ because the two scales are unrelated.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
 from app.advice.grain import infer_grain
 from app.models import (
@@ -70,11 +71,39 @@ _GRAIN_CRF_DELTA: dict[Encoder, dict[GrainLevel, float]] = {
     },
 }
 
-# Film-grain synthesis strength, only used where grain dominates the image.
-_FILM_GRAIN_STRENGTH: dict[GrainLevel, int] = {
-    GrainLevel.HEAVY: 12,
-    GrainLevel.EXTREME: 20,
+
+@dataclass(frozen=True, slots=True)
+class _Synthesis:
+    """How SVT-AV1 should handle the grain: replace it, or shore it up."""
+
+    strength: int
+    # True denoises the picture and re-synthesises grain at playback — the largest
+    # saving there is, at the cost of a *uniform* grain field. False leaves the real
+    # grain in the picture to be coded and uses synthesis only as a floor, filling in
+    # where the quantiser flattened it.
+    denoise: bool
+
+
+# Only ever applied to a photochemical source: synthesising grain over a digitally
+# acquired image lays noise on a picture that never had any.
+_FILM_GRAIN: dict[GrainLevel, _Synthesis] = {
+    GrainLevel.LIGHT: _Synthesis(4, denoise=False),
+    GrainLevel.MODERATE: _Synthesis(8, denoise=False),
+    # At these levels grain *is* the image, and coding every particle of it is what
+    # makes a grainy film enormous. Denoise-and-resynthesise is the right trade.
+    GrainLevel.HEAVY: _Synthesis(12, denoise=True),
+    GrainLevel.EXTREME: _Synthesis(20, denoise=True),
 }
+
+# Stocks got finer, and dupe negatives and optical printing got rarer. A pre-1970
+# negative carries coarser, higher-contrast grain than a late-1990s one of the same
+# format, so the same "35 mm" row means more grain to protect.
+_COARSE_STOCK_YEAR = 1970
+_COARSE_STOCK_BONUS = 4
+
+# SVT-AV1 warns that film-grain above this preset "produces a significant compute
+# overhead" and is for debugging only. Measured against SVT-AV1 4.2.0, not folklore.
+_MAX_FILM_GRAIN_PRESET = 6
 
 _SIZE_CRF_DELTA: dict[SizePreference, float] = {
     SizePreference.ARCHIVAL: -2.0,
@@ -228,6 +257,32 @@ def estimate_bitrate(
 # --- plan construction ------------------------------------------------------
 
 
+def _release_year(request: EncodeRequest) -> int | None:
+    """The film's year, from whichever of the two places knows it.
+
+    A looked-up year beats a parsed one: ``fallback_year`` is whatever the CLI read out
+    of the filename, which is right often enough to be useful and wrong often enough
+    that TMDB wins when it answered.
+    """
+    if request.movie is not None:
+        return request.movie.year
+    return request.fallback_year
+
+
+def _is_coarse_stock(request: EncodeRequest, grain: GrainProfile) -> bool:
+    """Whether this is an early photochemical source, which grains differently.
+
+    The format row says how big the negative was; the year says what was coated on it
+    and how many optical generations sit between it and the scan. Both have to point at
+    film for the era to mean anything — a 2020 digital film released in a year we do not
+    know is not a 1962 negative.
+    """
+    if not grain.is_photochemical:
+        return False
+    year = _release_year(request)
+    return year is not None and year <= _COARSE_STOCK_YEAR
+
+
 def _colour_params(encoder: Encoder, video: VideoTrack | None) -> dict[str, str]:
     """Carry the source's colour signalling into the encode.
 
@@ -337,24 +392,58 @@ def _svt_av1_plan(request: EncodeRequest, grain: GrainProfile) -> EncoderPlan:
         "scd": "1",
     }
 
-    strength = _FILM_GRAIN_STRENGTH.get(grain.level)
-    synthesised = strength is not None
-    if strength is not None:
+    synthesis = _FILM_GRAIN.get(grain.level) if grain.is_photochemical else None
+    coarse = synthesis is not None and _is_coarse_stock(request, grain)
+
+    if synthesis is not None:
+        if preset > _MAX_FILM_GRAIN_PRESET:
+            rationale.append(
+                f"Preset {_MAX_FILM_GRAIN_PRESET} rather than {preset}: SVT-AV1 warns that "
+                "film-grain above preset 6 is a large compute overhead meant for debugging, "
+                "and the grain settings matter more here than the last step of speed."
+            )
+            preset = _MAX_FILM_GRAIN_PRESET
+
+        strength = synthesis.strength + (_COARSE_STOCK_BONUS if coarse else 0)
         params["film-grain"] = str(strength)
-        params["film-grain-denoise"] = "1"
+        params["film-grain-denoise"] = "1" if synthesis.denoise else "0"
+
+        if synthesis.denoise:
+            rationale.append(
+                f"film-grain={strength} with film-grain-denoise=1: SVT-AV1 removes the "
+                "grain, codes the clean image, and re-synthesises grain at playback. On a "
+                "negative this coarse that is the single largest saving available. The "
+                "grain it puts back is uniform, though, so if this film's grain varies by "
+                "shot — a blow-up, a mixed-format shoot — set film-grain-denoise=0 and "
+                f"drop film-grain to about {max(2, strength // 3)} instead."
+            )
+        else:
+            rationale.append(
+                f"film-grain={strength} with film-grain-denoise=0: the film's own grain "
+                "stays in the picture and is coded, and synthesis only acts as a floor "
+                "where the quantiser flattened it. Turning the denoiser on would be "
+                "smaller, but it replaces this negative's grain with a uniform field."
+            )
+            # AV1's loop restoration is a Wiener / self-guided filter fitted per unit —
+            # a denoiser inside the loop. Where the grain is being coded rather than
+            # replaced, it spends bits smoothing away what was just paid for. CDEF is
+            # left alone deliberately: it is also a deringer, and dropping it trades
+            # grain for visible artefacts at these CRFs.
+            params["enable-restoration"] = "0"
+            rationale.append(
+                "enable-restoration=0: AV1's loop restoration is a Wiener filter applied "
+                "inside the coding loop, so on a source whose grain is being coded it "
+                "smooths away texture the encode has already paid for."
+            )
+
+    if coarse:
+        # x265 gets the same idea as qcomp below; this is SVT-AV1's version of it.
+        params["qp-scale-compress-strength"] = "2"
         rationale.append(
-            f"film-grain={strength} with the denoiser on: SVT-AV1 removes the grain, "
-            "codes the clean image, and re-synthesises grain at playback. That is the "
-            "single largest saving available on a grainy film. If you would rather code "
-            "the real grain, set film-grain-denoise=0 and drop film-grain to about "
-            f"{max(2, strength // 3)} — otherwise you get coded grain *and* synthesised "
-            "grain on top."
-        )
-    elif grain.level is not GrainLevel.NONE:
-        rationale.append(
-            "No film-grain synthesis at this grain level: synthesised grain is uniform, "
-            "and on light or moderate grain that reads as noise laid over the picture "
-            "rather than as the picture's own texture."
+            f"qp-scale-compress-strength=2 for a {_release_year(request)} negative: it "
+            "flattens the QP scale between temporal layers, so the B-frames are not "
+            "quantised much harder than the keyframes they inherit their grain from. "
+            "Coarse early stock is where that difference shows first."
         )
 
     params.update(_colour_params(Encoder.SVT_AV1, video))
@@ -375,7 +464,13 @@ def _svt_av1_plan(request: EncodeRequest, grain: GrainProfile) -> EncoderPlan:
         ],
         rationale=rationale,
         estimated_bitrate_bps=estimate_bitrate(
-            Encoder.SVT_AV1, crf, video, grain.level, synthesised=synthesised
+            # Only denoise-and-resynthesise makes a grainy film cheap; synthesis used as
+            # a floor still codes every particle, so the grain factor stands.
+            Encoder.SVT_AV1,
+            crf,
+            video,
+            grain.level,
+            synthesised=synthesis is not None and synthesis.denoise,
         ),
     )
 
@@ -434,17 +529,51 @@ def _x265_plan(request: EncodeRequest, grain: GrainProfile) -> EncoderPlan:
     }
 
     if grain.level.rank >= GrainLevel.MODERATE.rank:
+        coarse = _is_coarse_stock(request, grain)
         tune = "grain"
         rationale.append(
-            "--tune grain is the whole point of x265 on this film: it raises qcomp, "
-            "turns off SAO and cu-tree, and loosens deblocking, all of which stop the "
-            "encoder treating grain as noise to be removed."
+            "--tune grain is the whole point of x265 on this film: it raises psy-rd to "
+            "4.0 and psy-rdoq to 10, and turns off SAO, cu-tree, AQ and rskip, all of "
+            "which stop the encoder treating grain as noise to be removed. What it does "
+            "*not* do, despite its reputation, is change qcomp or the deblocking "
+            "offsets — measured against x265 4.2, both stay at their defaults — so the "
+            "two below are set by hand."
         )
         # tune grain sets aq-mode 0; auto-variance AQ still helps dark grainy scenes,
         # and explicit params are applied after the tune, so this wins.
         params["aq-mode"] = "3"
         params["aq-strength"] = "0.8" if grain.level.rank >= GrainLevel.HEAVY.rank else "0.9"
         params["rc-lookahead"] = "60"
+
+        params["qcomp"] = "0.85" if coarse else "0.8"
+        rationale.append(
+            f"qcomp={params['qcomp']} against the 0.60 default: a flatter quantiser "
+            "curve spends closer to the same quality on the complex frames, and on a "
+            "grainy film every frame is a complex frame."
+            + (
+                " Higher still here, because coarse early stock varies far more from shot to shot."
+                if coarse
+                else ""
+            )
+        )
+
+        # One value, not "-1:-1": params_string joins on ':', and libx265 reads the
+        # second half of a colon-separated value as a parameter name — which silently
+        # swallows whatever comes after it. A single value sets both offsets anyway.
+        params["deblock"] = "-2" if coarse else "-1"
+        rationale.append(
+            f"deblock={params['deblock']} (both offsets): the in-loop deblocking filter "
+            "does not know the difference between a block edge and grain, and at its "
+            "default strength it takes the grain with it."
+        )
+
+        if grain.is_photochemical:
+            params["strong-intra-smoothing"] = "0"
+            rationale.append(
+                "strong-intra-smoothing=0: it bilinear-smooths intra prediction across "
+                "large flat blocks, which is exactly where fine grain lives — skies, "
+                "walls, dissolves."
+            )
     else:
         params["aq-mode"] = "3"
         params["sao"] = "0"
@@ -579,7 +708,7 @@ def build_advice(request: EncodeRequest) -> Advice:
     grain = infer_grain(
         request.specs,
         request.source,
-        year=request.movie.year if request.movie else request.fallback_year,
+        year=_release_year(request),
         override=request.grain_override,
     )
 

@@ -210,7 +210,33 @@ baseline's own rationale, no explaining what CRF is. If you have nothing to add 
 plan, return an empty rationale list.
 9. Grain is the priority: this tool exists to stop film grain being smoothed into \
 mush. If your suggestion trades grain for size, say so explicitly.
-10. If the source looks like a bad candidate for re-encoding at all, put that in \
+10. Answer with grain settings, not only a CRF. For a source shot on film, decide and \
+justify, per encoder:
+  - SVT-AV1: the film-grain strength, and above all film-grain-denoise — 1 denoises the \
+picture and replaces its grain with a uniform synthetic field, 0 leaves the real grain \
+to be coded and uses synthesis only as a floor where the quantiser flattened it. Say \
+which of the two this film wants and why. Then the in-loop filters that smooth grain \
+(enable-restoration, enable-cdef, enable-dlf), the rate control that decides whether \
+grainy frames keep their bits (qp-scale-compress-strength, luminance-qp-bias, \
+enable-variance-boost with variance-boost-strength and variance-octile), and sharpness, \
+enable-tf and tune.
+  - x265: tune grain raises psy-rd to 4.0 and psy-rdoq to 10 and turns off SAO, cu-tree, \
+AQ and rskip — but it does not touch qcomp or the deblocking offsets, so move those \
+yourself if you want them moved. Then aq-mode and aq-strength, sao / selective-sao / \
+limit-sao, strong-intra-smoothing, psy-rd and psy-rdoq, rd and rdoq-level.
+A plan that moves the CRF and nothing else is not an answer for a film source.
+11. Older films need their own answer, and the year alone is not it: stock, dupe \
+negatives and optical printing are what decide the grain. A pre-1970 negative, a \
+blow-up, and anything printed through a dupe carry coarser, higher-contrast grain than a \
+late-1990s camera negative, and older restorations often carry scanner noise and gate \
+weave on top of the real grain. Use the year, country, director and format rows you were \
+given to say which of those this film is, then tune for that case — including whether \
+its grain should be coded or synthesised rather than either by default.
+12. No parameter value may contain a colon. The parameters are joined with ':' into one \
+-svtav1-params / -x265-params string, and a colon inside a value makes the encoder read \
+the far half as a parameter name and drop the one after it. Write deblock=-1, which x265 \
+applies to both offsets, never deblock=-1:-1.
+13. If the source looks like a bad candidate for re-encoding at all, put that in \
 warnings rather than quietly encoding it anyway.
 """
 
@@ -565,6 +591,9 @@ def build_context(request: EncodeRequest, baseline: Advice) -> dict[str, Any]:
             "level": baseline.grain.level.value,
             "confidence": round(baseline.grain.confidence, 2),
             "origin_format": baseline.grain.origin_format,
+            # Spelled out rather than left to be inferred from origin_format, because
+            # the grain rules the model is asked to follow all hinge on it.
+            "photochemical": baseline.grain.is_photochemical,
             "reasons": baseline.grain.reasons,
             "set_by_user": baseline.grain.user_override,
         },
@@ -595,6 +624,10 @@ def build_context(request: EncodeRequest, baseline: Advice) -> dict[str, Any]:
             "runtime_minutes": movie.runtime_minutes,
             "overview": (movie.overview or "")[:MAX_OVERVIEW_CHARS] or None,
         }
+    elif request.fallback_year is not None:
+        # No film was looked up — the CLI's --year, or the year in the filename, is then
+        # the only thing the era half of the grain rules has to work from.
+        context["release_year"] = request.fallback_year
 
     specs = {
         name: value
