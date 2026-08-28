@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # --- build stage: resolve and install dependencies into a self-contained venv ---
-FROM python:3.13-slim AS builder
+FROM python:3.14-slim AS builder
 
 # uv comes from its official image, so no local uv install is needed.
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
@@ -23,7 +23,7 @@ COPY app ./app
 RUN uv pip install --no-cache --no-deps .
 
 # --- runtime stage ---
-FROM python:3.13-slim AS runtime
+FROM python:3.14-slim AS runtime
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
