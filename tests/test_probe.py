@@ -3,7 +3,7 @@
 The subprocess sits behind an injected ``runner``, so all of the failure handling is
 tested without ffmpeg installed. Two tests do start a real process — the missing binary
 and the timeout — because those paths are entirely about what
-:func:`~app.cli.probe.run_ffprobe` does with the operating system's answer, and a fake
+:func:`~app.probe.run_ffprobe` does with the operating system's answer, and a fake
 runner would only be testing itself.
 """
 
@@ -15,8 +15,8 @@ from pathlib import Path
 
 import pytest
 
-from app.cli.probe import FFPROBE_ARGS, ProbeFailed, Runner, probe, run_ffprobe
 from app.models import SourceTool
+from app.probe import FFPROBE_ARGS, ProbeFailed, Runner, probe, run_ffprobe
 from tests.support import fixture, run
 
 FILM = Path("/movies/Blade.Runner.1982.2160p.mkv")

@@ -24,32 +24,58 @@
   "compact": "Compact — accept some loss for size",
 } %}
 
-<div class="card film">
-  {% if movie.poster_url %}
-    <img class="poster large" src="{{ movie.poster_url }}" alt="" width="92" />
-  {% endif %}
-  <div>
-    <h2>
-      {{ movie.title }}
-      {% if movie.year %}<span class="muted">({{ movie.year }})</span>{% endif %}
-    </h2>
-    <p class="muted film-meta">
-      {% if movie.directors %}{{ movie.directors | join(", ") }}{% endif %}
-      {% if movie.runtime_minutes %} · {{ movie.runtime_minutes }} min{% endif %}
-      {% if movie.genres %} · {{ movie.genres | join(", ") }}{% endif %}
-      {% if movie.countries %} · {{ movie.countries | join(", ") }}{% endif %}
+{% if file_warning %}
+  <div class="card problem" role="alert">
+    <p>{{ file_warning }}</p>
+    <p class="muted">
+      The file was read, so the settings below are built on its own numbers — only the
+      film's negative format is missing. Type its IMDb id to get that back.
     </p>
-    {% if movie.imdb_url %}
-      <p class="muted">
-        <a href="{{ movie.imdb_url }}" target="_blank" rel="noreferrer noopener">IMDb</a>
-        ·
-        <a href="{{ movie.imdb_technical_url }}" target="_blank" rel="noreferrer noopener">
-          technical specifications
-        </a>
-      </p>
-    {% endif %}
   </div>
-</div>
+{% endif %}
+
+{% if movie %}
+  <div class="card film">
+    {% if movie.poster_url %}
+      <img class="poster large" src="{{ movie.poster_url }}" alt="" width="92" />
+    {% endif %}
+    <div>
+      <h2>
+        {{ movie.title }}
+        {% if movie.year %}<span class="muted">({{ movie.year }})</span>{% endif %}
+      </h2>
+      <p class="muted film-meta">
+        {% if movie.directors %}{{ movie.directors | join(", ") }}{% endif %}
+        {% if movie.runtime_minutes %} · {{ movie.runtime_minutes }} min{% endif %}
+        {% if movie.genres %} · {{ movie.genres | join(", ") }}{% endif %}
+        {% if movie.countries %} · {{ movie.countries | join(", ") }}{% endif %}
+      </p>
+      {% if movie.imdb_url %}
+        <p class="muted">
+          <a href="{{ movie.imdb_url }}" target="_blank" rel="noreferrer noopener">IMDb</a>
+          ·
+          <a href="{{ movie.imdb_technical_url }}" target="_blank" rel="noreferrer noopener">
+            technical specifications
+          </a>
+        </p>
+      {% endif %}
+    </div>
+  </div>
+{% else %}
+  <div class="card film no-film">
+    <div>
+      <h2>{{ file.name if file else "No film identified" }}</h2>
+      <p class="muted">
+        You chose to carry on without identifying the film, so the grain level is guessed
+        from {{ "the year in the filename" if fallback_year else "nothing at all" }} rather
+        than from what the film was shot on. Everything else below comes from the file.
+      </p>
+      <p class="muted">
+        Type the IMDb id if you know it — that is all the negative format needs.
+      </p>
+    </div>
+  </div>
+{% endif %}
 
 <form
   class="card advise-form"
@@ -57,8 +83,30 @@
   hx-target="#advice"
   hx-indicator="#advise-spinner"
 >
-  <input type="hidden" name="tmdb_id" value="{{ movie.tmdb_id }}" />
-  <input type="hidden" name="imdb_id" value="{{ movie.imdb_id or '' }}" />
+  {% if movie %}
+    <input type="hidden" name="tmdb_id" value="{{ movie.tmdb_id }}" />
+    <input type="hidden" name="imdb_id" value="{{ movie.imdb_id or '' }}" />
+  {% endif %}
+  {% if fallback_year %}
+    <input type="hidden" name="fallback_year" value="{{ fallback_year }}" />
+  {% endif %}
+
+  {% if not movie %}
+    <p class="field">
+      <label for="imdb_id">IMDb id</label>
+      <input
+        id="imdb_id"
+        name="imdb_id"
+        type="text"
+        inputmode="latin"
+        autocomplete="off"
+        placeholder="tt0083658"
+      />
+      <span class="muted">
+        It is in the film's IMDb address. With it, the rows below can be looked up.
+      </span>
+    </p>
+  {% endif %}
 
   <h2>How it was shot</h2>
   <div id="technical-panel">
@@ -66,7 +114,7 @@
   </div>
 
   <p class="row">
-    {% if capabilities.imdb_technical_lookup and movie.imdb_id %}
+    {% if capabilities.imdb_technical_lookup %}
       <button
         type="button"
         class="secondary"
@@ -86,7 +134,7 @@
   <details class="paste">
     <summary>Paste the technical specifications from IMDb</summary>
     <p class="muted">
-      {% if movie.imdb_technical_url %}
+      {% if movie and movie.imdb_technical_url %}
         <a href="{{ movie.imdb_technical_url }}" target="_blank" rel="noreferrer noopener">
           Open the technical page</a>, select the specifications and paste them here —
         the formatted text, as it reads on screen.
@@ -108,24 +156,43 @@
   </details>
 
   <h2>Your source file</h2>
-  <p class="muted">
-    Run one of these and paste the whole output. ffprobe is the most complete;
-    mkvinfo is authoritative for Matroska but often omits bit depth; MediaInfo rounds
-    its numbers.
-  </p>
-  <ul class="commands muted">
-    <li><code>ffprobe -v quiet -print_format json -show_format -show_streams FILE</code></li>
-    <li><code>mkvinfo FILE</code></li>
-    <li><code>mediainfo FILE</code></li>
-  </ul>
-  <label class="sr-only" for="source_text">Source file description</label>
-  <textarea
-    id="source_text"
-    name="source_text"
-    rows="10"
-    spellcheck="false"
-    placeholder="Paste ffprobe JSON, mkvinfo output, or a MediaInfo report…"
-  ></textarea>
+  {% if source_text %}
+    {# Already read, here, with ffprobe. The JSON stays in the same field a paste fills,
+       and stays editable — it is the only description of the file from here on. #}
+    <p class="summary">{{ media.describe() }}</p>
+    <p class="muted">
+      Read from <code>{{ file }}</code> with <code>ffprobe</code>.
+    </p>
+    <details class="paste">
+      <summary>What ffprobe said</summary>
+      <label class="sr-only" for="source_text">Source file description</label>
+      <textarea
+        id="source_text"
+        name="source_text"
+        rows="10"
+        spellcheck="false"
+      >{{ source_text }}</textarea>
+    </details>
+  {% else %}
+    <p class="muted">
+      Run one of these and paste the whole output. ffprobe is the most complete;
+      mkvinfo is authoritative for Matroska but often omits bit depth; MediaInfo rounds
+      its numbers.
+    </p>
+    <ul class="commands muted">
+      <li><code>ffprobe -v quiet -print_format json -show_format -show_streams FILE</code></li>
+      <li><code>mkvinfo FILE</code></li>
+      <li><code>mediainfo FILE</code></li>
+    </ul>
+    <label class="sr-only" for="source_text">Source file description</label>
+    <textarea
+      id="source_text"
+      name="source_text"
+      rows="10"
+      spellcheck="false"
+      placeholder="Paste ffprobe JSON, mkvinfo output, or a MediaInfo report…"
+    ></textarea>
+  {% endif %}
 
   <div class="grid">
     <p class="field">
@@ -133,7 +200,9 @@
       <select id="source_tool" name="source_tool">
         <option value="">Work it out from the text</option>
         {% for tool in source_tools %}
-          <option value="{{ tool.value }}">{{ tool_labels[tool.value] }}</option>
+          <option value="{{ tool.value }}" {{ "selected" if source_tool == tool }}>
+            {{ tool_labels[tool.value] }}
+          </option>
         {% endfor %}
       </select>
     </p>
@@ -184,11 +253,23 @@
   <div class="grid">
     <p class="field">
       <label for="input_path">Input filename</label>
-      <input id="input_path" name="input_path" type="text" placeholder="input.mkv" />
+      <input
+        id="input_path"
+        name="input_path"
+        type="text"
+        placeholder="input.mkv"
+        value="{{ input_path or '' }}"
+      />
     </p>
     <p class="field">
       <label for="output_stem">Output name</label>
-      <input id="output_stem" name="output_stem" type="text" placeholder="from the title" />
+      <input
+        id="output_stem"
+        name="output_stem"
+        type="text"
+        placeholder="{{ 'from the filename' if file and not movie else 'from the title' }}"
+        value="{{ output_stem or '' }}"
+      />
     </p>
   </div>
 

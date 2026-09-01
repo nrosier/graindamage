@@ -16,7 +16,7 @@ an event loop between awaits.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +34,7 @@ from app.models import (
     TechnicalSpecs,
     VideoTrack,
 )
+from app.probe import Runner
 from app.providers.gemini import GeminiClient
 from app.providers.tmdb import TmdbClient
 
@@ -222,6 +223,28 @@ def gemini_answer(**overrides: Any) -> dict[str, Any]:
     return {**payload, **overrides}
 
 
+# --- ffprobe ----------------------------------------------------------------
+
+FILM_NAME = "Blade.Runner.1982.2160p.BluRay.x265-GRP.mkv"
+FFPROBE_REPORT = fixture("ffprobe_uhd_hdr.json")
+
+
+def film_in(directory: Path, name: str = FILM_NAME) -> Path:
+    """A file with a film's name on it. Nothing reads its bytes; ``ffprobe`` is a stub."""
+    path = directory / name
+    path.write_bytes(b"not really a film, and ffprobe is a stub")
+    return path
+
+
+def probing(code: int = 0, out: str = FFPROBE_REPORT, err: str = "") -> Runner:
+    """A stub ``ffprobe``. Shared, so both front-ends are shown the same file."""
+
+    async def runner(args: Sequence[str], timeout: float) -> tuple[int, str, str]:
+        return code, out, err
+
+    return runner
+
+
 # --- app builder ------------------------------------------------------------
 
 
@@ -230,11 +253,18 @@ def make_app(
     *,
     tmdb: httpx2.AsyncClient | None = None,
     gemini: httpx2.AsyncClient | None = None,
+    library_root: Path | None = None,
+    runner: Runner | None = None,
 ) -> FastAPI:
     """The real app, with mock transports pushed into whichever providers a test uses.
 
     The router reads ``services.<provider>`` per request, so replacing them after
     construction is enough — and it keeps ``create_app`` itself under test.
+
+    ``library_root`` and ``runner`` are the same seams: a test that browses points the
+    root at ``tmp_path`` and hands over :func:`probing` instead of a real ``ffprobe``.
+    Left alone, the app browses ``/mnt`` and shells out, which is what it does in
+    production and what the no-mount tests want.
     """
     app = create_app(settings)
     services = app.state.services
@@ -242,4 +272,8 @@ def make_app(
         services.tmdb = TmdbClient(settings, client=tmdb)
     if gemini is not None:
         services.gemini = GeminiClient(settings, client=gemini)
+    if library_root is not None:
+        services.library_root = library_root
+    if runner is not None:
+        services.runner = runner
     return app

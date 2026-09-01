@@ -20,14 +20,12 @@ import pytest
 
 from app.cli.app import EXIT_ABORTED, EXIT_OK, EXIT_SETUP, main
 from app.cli.prompts import Choice, Terminal
-from app.cli.wizard import choose_input, find_videos
-from tests.support import make_settings
+from app.cli.wizard import choose_input
+from tests.support import FILM_NAME, film_in, make_settings
 from tests.test_cli_run import (
-    FILM_NAME,
     NO_ROWS,
     PASTED_PAGE,
     context,
-    film_in,
     gemini_transport,
     keyed,
     paper,
@@ -383,25 +381,6 @@ def test_replacing_them_is_the_first_row(tmp_path: Path) -> None:
 # --- the file, when there was no argument ----------------------------------
 
 
-def test_find_videos_takes_the_video_files_and_leaves_the_rest(tmp_path: Path) -> None:
-    (tmp_path / "one.mkv").touch()
-    (tmp_path / "notes.txt").touch()
-    (tmp_path / ".hidden.mkv").touch()
-    (tmp_path / "deep").mkdir()
-    (tmp_path / "deep" / "two.MP4").touch()
-
-    found = find_videos(tmp_path)
-
-    assert [path.name for path in found] == ["one.mkv", "two.MP4"]
-
-
-def test_find_videos_stops_at_the_cap(tmp_path: Path) -> None:
-    for index in range(5):
-        (tmp_path / f"{index}.mkv").touch()
-
-    assert len(find_videos(tmp_path, limit=3)) == 3
-
-
 def test_choosing_a_file_from_the_menu(tmp_path: Path) -> None:
     film = film_in(tmp_path)
     terminal = Wizarding([FILM_NAME])
@@ -409,8 +388,9 @@ def test_choosing_a_file_from_the_menu(tmp_path: Path) -> None:
     assert choose_input(terminal, cwd=tmp_path) == film
 
 
-def test_a_row_is_sized_in_whichever_unit_says_something(tmp_path: Path) -> None:
-    """A film is gigabytes, a trailer is not, and `0.0 GB` beside a file reads as a fault."""
+def test_the_menu_row_carries_the_size(tmp_path: Path) -> None:
+    """Which unit is chosen is ``library.human_size``'s business; that the row shows it
+    at all is this menu's, because size is how you tell a film from its trailer."""
     small = tmp_path / "Trailer.mkv"
     with small.open("wb") as handle:
         handle.truncate(40_000_000)

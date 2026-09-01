@@ -1,12 +1,17 @@
 """Running ``ffprobe`` on a file and parsing what it says.
 
-The web app only ever *parses* text someone pasted; this is the one place in the project
-that starts a process. It stays here, out of :mod:`app.sources`, so that importing the
-parsers can never imply the ability to execute anything.
+Both front-ends read files this way — the CLI on the path it was given, the web app on a
+file picked out of the library — and this is the one place in the project that starts a
+process. It stays out of :mod:`app.sources` so that importing the parsers can never imply
+the ability to execute anything.
 
 ``create_subprocess_exec`` takes an argument list and no shell, so a filename full of
 spaces, quotes or semicolons is just a filename. The subprocess itself sits behind an
 injected ``runner`` so the tests do not need ffmpeg installed to exercise every failure.
+
+:func:`probe_text` and :func:`probe` are the same call, split where the web app needs to
+get in: it caches and re-serves ffprobe's own JSON, because that text is what its step-2
+form carries, and parses it separately.
 """
 
 from __future__ import annotations
@@ -32,6 +37,24 @@ class ProbeFailed(RuntimeError):
     """``ffprobe`` is missing, refused the file, or said something unreadable."""
 
 
+async def probe_text(
+    path: Path,
+    *,
+    executable: str = "ffprobe",
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    runner: Runner | None = None,
+) -> str:
+    """What ``ffprobe`` says about ``path``, verbatim, or :class:`ProbeFailed`."""
+    args = [executable, *FFPROBE_ARGS, _as_argument(path)]
+    code, out, err = await (runner or run_ffprobe)(args, timeout)
+
+    if code != 0:
+        raise ProbeFailed(f"{executable} exited {code} on {path.name}.{_detail(err)}")
+    if not out.strip():
+        raise ProbeFailed(f"{executable} described {path.name} with nothing at all.{_detail(err)}")
+    return out
+
+
 async def probe(
     path: Path,
     *,
@@ -40,14 +63,12 @@ async def probe(
     runner: Runner | None = None,
 ) -> SourceReport:
     """Describe ``path`` by asking ``ffprobe`` about it."""
-    args = [executable, *FFPROBE_ARGS, _as_argument(path)]
-    code, out, err = await (runner or run_ffprobe)(args, timeout)
+    out = await probe_text(path, executable=executable, timeout=timeout, runner=runner)
+    return read_probe_text(out, executable=executable)
 
-    if code != 0:
-        raise ProbeFailed(f"{executable} exited {code} on {path.name}.{_detail(err)}")
-    if not out.strip():
-        raise ProbeFailed(f"{executable} described {path.name} with nothing at all.{_detail(err)}")
 
+def read_probe_text(out: str, *, executable: str = "ffprobe") -> SourceReport:
+    """Parse ffprobe's JSON, blaming ffprobe rather than the parsers when it will not."""
     try:
         return parse_source(out, tool=SourceTool.FFPROBE)
     except (UnknownSourceFormat, ValueError) as exc:

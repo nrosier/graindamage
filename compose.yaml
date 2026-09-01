@@ -20,4 +20,10 @@ services:
       # Set MEDIA_DIR in .env to your library; the default keeps ./media out of the way.
       # It is read-write on purpose: the two files are written beside the film.
       - ${MEDIA_DIR:-./media}:/media
+      # The same library again, at the one path the web UI will browse. /mnt is fixed in
+      # the code rather than configured, so the mount is what points it at your films —
+      # and it has to be readable by the `app` user the image runs as. Read-only, because
+      # the web UI only ever looks: it hands you the settings, it does not write beside
+      # the film the way the command line does.
+      - ${MEDIA_DIR:-./media}:/mnt:ro
     restart: unless-stopped

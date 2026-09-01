@@ -38,7 +38,6 @@ from pathlib import Path
 
 from app import __version__
 from app.advice import finish_advice
-from app.cli.filename import NameGuess, guess_name
 from app.cli.outputs import (
     OutputExists,
     Written,
@@ -47,7 +46,6 @@ from app.cli.outputs import (
     script_text,
     write_outputs,
 )
-from app.cli.probe import ProbeFailed, probe
 from app.cli.prompts import Choice, Terminal
 from app.cli.report import render_report
 from app.cli.session import (
@@ -59,7 +57,6 @@ from app.cli.session import (
     Context,
     FoundSpecs,
     SetupProblem,
-    best_hit,
     film_detail,
     is_imdb_id,
     make_context,
@@ -69,6 +66,7 @@ from app.cli.session import (
 )
 from app.cli.wizard import Answers, answers_from, choose_input
 from app.cli.wizard import run as run_wizard
+from app.filename import NameGuess, best_hit, guess_name
 from app.models import (
     Advice,
     Encoder,
@@ -81,6 +79,7 @@ from app.models import (
     SpecsSource,
     SpeedPreference,
 )
+from app.probe import ProbeFailed, probe
 from app.providers import ProviderError
 from app.providers.gemini import GeminiClient
 from app.providers.tmdb import TmdbClient

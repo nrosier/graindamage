@@ -356,6 +356,72 @@ summary:hover {
   gap: 0.3rem;
 }
 
+/* --- the library browser ------------------------------------------------ */
+
+.crumbs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.35rem;
+  margin: 0.4rem 0 0.8rem;
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.crumbs .sep {
+  color: var(--line);
+}
+
+.browser {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+}
+
+.browser li {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 0.8rem;
+  align-items: center;
+  padding: 0.45rem 0;
+  border-top: 1px solid var(--line);
+}
+
+.browser li:first-child {
+  border-top: none;
+}
+
+.browser li.dir a::before {
+  /* A directory is the thing you open, so it says so before it is read. */
+  content: "▸ ";
+  color: var(--accent);
+}
+
+.browser li.up a {
+  color: var(--muted);
+}
+
+.browser .name,
+.browser li.dir a {
+  overflow-wrap: anywhere;
+}
+
+.browser .size {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+
+.source-file .path {
+  overflow-wrap: anywhere;
+}
+
+.card.no-film form {
+  margin-bottom: 0.5rem;
+}
+
 /* --- search results ----------------------------------------------------- */
 
 .hits {
@@ -595,6 +661,10 @@ summary:hover {
 @media (max-width: 34rem) {
   .hits li {
     grid-template-columns: auto 1fr;
+  }
+
+  .browser li {
+    grid-template-columns: 1fr auto;
   }
 
   .command {

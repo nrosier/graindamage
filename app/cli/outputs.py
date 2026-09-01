@@ -24,7 +24,6 @@ from typing import Any
 
 from app import __version__
 from app.advice import render_handbrake_preset
-from app.cli.report import source_summary
 from app.models import Advice, EncodeRequest, Movie
 
 # A comment is one line by definition, and a filename or a model's summary can
@@ -110,7 +109,7 @@ def script_text(
         "#!/usr/bin/env bash",
         _comment(title, label=f"graindamage {__version__} — FFmpeg commands for "),
         "#",
-        _comment(source_summary(request.source), label="Source: "),
+        _comment(request.source.describe(), label="Source: "),
         _comment(
             f"{grain.level.value}{origin}, confidence {grain.confidence:.0%}", label="Grain:  "
         ),

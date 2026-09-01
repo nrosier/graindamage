@@ -1,0 +1,51 @@
+{# One directory of the library. Every link and every form here carries a full path,
+   which app/library.py checks again before it is opened. #}
+<nav class="crumbs" aria-label="Library path">
+  {% for name, path in listing.crumbs %}
+    {% if loop.last %}
+      <span aria-current="page">{{ name }}</span>
+    {% else %}
+      <a href="#" hx-get="/browse?path={{ path | urlencode }}" hx-target="#browser">{{ name }}</a>
+      <span class="sep" aria-hidden="true">/</span>
+    {% endif %}
+  {% endfor %}
+</nav>
+
+{% if listing.is_empty %}
+  <p class="muted">
+    Nothing here — no subdirectories, and no files in a container this app recognises.
+  </p>
+{% endif %}
+
+<ul class="browser">
+  {% if listing.parent %}
+    <li class="up">
+      <a href="#" hx-get="/browse?path={{ listing.parent | urlencode }}" hx-target="#browser">
+        ↑ up one level
+      </a>
+    </li>
+  {% endif %}
+  {% for entry in listing.entries %}
+    <li class="{{ 'dir' if entry.is_dir else 'file' }}">
+      {% if entry.is_dir %}
+        <a href="#" hx-get="/browse?path={{ entry.path | urlencode }}" hx-target="#browser">
+          {{ entry.name }}
+        </a>
+      {% else %}
+        <span class="name">{{ entry.name }}</span>
+        <span class="muted size">{{ entry.size }}</span>
+        <form hx-post="/file" hx-target="#results" hx-indicator="#browse-spinner">
+          <input type="hidden" name="path" value="{{ entry.path }}" />
+          <button type="submit" class="secondary">Use this file</button>
+        </form>
+      {% endif %}
+    </li>
+  {% endfor %}
+</ul>
+
+{% if listing.dropped %}
+  <p class="muted">
+    {{ listing.dropped }} more entr{{ "y" if listing.dropped == 1 else "ies" }} in this
+    directory are not shown. Open a subdirectory to narrow it down.
+  </p>
+{% endif %}

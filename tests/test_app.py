@@ -15,6 +15,10 @@ Providers reach a mock transport, so no test here needs the network — and
 from __future__ import annotations
 
 import json
+import re
+from collections.abc import Sequence
+from html import unescape
+from pathlib import Path
 from typing import Any
 
 import httpx2
@@ -22,13 +26,17 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import __version__
+from app.probe import Runner
 from tests.support import (
+    FILM_NAME,
+    film_in,
     fixture,
     gemini_answer,
     json_response,
     make_app,
     make_settings,
     mock_client,
+    probing,
 )
 
 FFPROBE_REPORT = fixture("ffprobe_uhd_hdr.json")
@@ -134,14 +142,24 @@ def gemini_transport(
     return mock_client(handler), seen
 
 
+# Whether a library is browsable is a fact about the filesystem, and CI's filesystem has
+# a /mnt while a laptop's does not. So every client here is pointed somewhere that is
+# certainly not a directory, and the tests that browse say where instead.
+NO_LIBRARY = Path("/graindamage-has-no-library-here")
+
+
 def client_for(
     *,
     tmdb: httpx2.AsyncClient | None = None,
     gemini: httpx2.AsyncClient | None = None,
+    library_root: Path = NO_LIBRARY,
+    runner: Runner | None = None,
     **overrides: Any,
 ) -> TestClient:
     settings = make_settings(**overrides)
-    return TestClient(make_app(settings, tmdb=tmdb, gemini=gemini))
+    return TestClient(
+        make_app(settings, tmdb=tmdb, gemini=gemini, library_root=library_root, runner=runner)
+    )
 
 
 @pytest.fixture
@@ -166,6 +184,8 @@ def test_healthz_reports_version_and_capabilities(client: TestClient) -> None:
         "imdb_technical_lookup": False,
         # The rules engine has no configuration, so an unkeyed container is still useful.
         "baseline_rules": True,
+        # Not a key but a mount, and this client is pointed at nothing.
+        "library_browse": False,
     }
 
 
@@ -178,6 +198,7 @@ def test_capabilities_follow_configuration() -> None:
         "gemini_advice": True,
         "imdb_technical_lookup": True,
         "baseline_rules": True,
+        "library_browse": False,
     }
 
 
@@ -249,6 +270,259 @@ def test_an_upstream_failure_is_still_an_http_200() -> None:
     # A 502 here would leave HTMX with nothing to swap and the user with no explanation.
     assert response.status_code == 200
     assert "TMDB returned HTTP 503." in response.text
+
+
+# --- step 1's other door: a file in the library -------------------------------
+
+
+def counting(out: str = FFPROBE_REPORT) -> tuple[Runner, list[tuple[str, ...]]]:
+    """A stub ``ffprobe`` that remembers being asked. For the cache, and the refusals."""
+    calls: list[tuple[str, ...]] = []
+
+    async def runner(args: Sequence[str], timeout: float) -> tuple[int, str, str]:
+        calls.append(tuple(args))
+        return 0, out, ""
+
+    return runner, calls
+
+
+def submitted(text: str) -> dict[str, str]:
+    """The step-2 form as a browser would send it back: every value it carries.
+
+    Used so the file tests reach ``/advise`` the way a person does, through whatever the
+    previous page actually rendered, rather than through a hand-written dict that could
+    agree with nothing.
+    """
+    fields = dict(re.findall(r'name="(\w+)"[^>]*?value="([^"]*)"', text, re.S))
+    body = re.search(r'name="source_text"[^>]*?>(.*?)</textarea>', text, re.S)
+    if body is not None:
+        fields["source_text"] = unescape(body.group(1))
+    return fields
+
+
+# TMDB's own order, with the film the filename names last, so "first" means reordered.
+FILENAME_LAST_PAYLOAD: dict[str, Any] = {"results": list(reversed(SEARCH_PAYLOAD["results"]))}
+
+
+def test_without_a_mount_there_is_nothing_to_browse(client: TestClient) -> None:
+    text = client.get("/").text
+
+    assert 'hx-get="/browse"' not in text
+    assert "mount your films at" in text
+
+
+def test_a_mount_is_a_capability_like_any_other(tmp_path: Path) -> None:
+    client = client_for(library_root=tmp_path)
+
+    assert client.get("/healthz").json()["capabilities"]["library_browse"] is True
+    text = client.get("/").text
+    assert 'hx-get="/browse"' in text
+    # Nothing is listed until it is asked for, so a page load reads no directories.
+    assert '<div id="browser"></div>' in text
+
+
+def test_browsing_lists_the_way_down_and_the_films(tmp_path: Path) -> None:
+    (tmp_path / "Ridley Scott").mkdir()
+    (tmp_path / "poster.jpg").touch()
+    film = film_in(tmp_path)
+
+    response = client_for(library_root=tmp_path).get("/browse")
+
+    assert response.status_code == 200
+    text = response.text
+    assert "Ridley Scott" in text
+    assert FILM_NAME in text
+    assert "poster.jpg" not in text
+    # Each row carries a whole path, which the route checks again before opening it.
+    assert f'name="path" value="{film.resolve()}"' in text
+
+
+def test_browsing_out_of_the_library_is_refused(tmp_path: Path) -> None:
+    response = client_for(library_root=tmp_path).get("/browse", params={"path": "/etc"})
+
+    assert response.status_code == 200
+    assert "outside" in response.text
+    assert "counts as out of it" in response.text
+
+
+def test_a_file_outside_the_library_is_never_probed(tmp_path: Path) -> None:
+    """The containment check comes before the subprocess, not after it."""
+    runner, calls = counting()
+
+    response = client_for(library_root=tmp_path, runner=runner).post(
+        "/file", data={"path": "/etc/passwd"}
+    )
+
+    assert response.status_code == 200
+    assert "outside" in response.text
+    assert calls == []
+
+
+def test_something_that_is_not_a_film_is_never_probed(tmp_path: Path) -> None:
+    notes = tmp_path / "notes.txt"
+    notes.touch()
+    runner, calls = counting()
+
+    response = client_for(library_root=tmp_path, runner=runner).post(
+        "/file", data={"path": str(notes)}
+    )
+
+    assert ".mkv" in response.text
+    assert calls == []
+
+
+def test_picking_a_file_reads_it_and_finds_the_film(tmp_path: Path) -> None:
+    """The CLI's step 1 without the terminal: probe, read the name, search for that."""
+    film = film_in(tmp_path)
+    tmdb, seen = tmdb_transport(search=json_response(FILENAME_LAST_PAYLOAD))
+    client = client_for(tmdb=tmdb, tmdb_api_key="key", library_root=tmp_path, runner=probing())
+
+    response = client.post("/file", data={"path": str(film)})
+
+    assert response.status_code == 200
+    text = response.text
+    # What the file is, read here rather than pasted.
+    assert "3840×2160" in text
+    assert "<code>ffprobe</code> on the server" in text
+    # What its name says, and what was searched for: the title, with the year as a filter.
+    assert "Blade Runner (1982) — read from the filename" in text
+    assert "Blade+Runner" in str(seen[0].url)
+    assert "1982" not in str(seen[0].url)
+    # The year-matching hit is first, though TMDB answered with it last.
+    assert text.index('value="78"') < text.index('value="335984"')
+    assert "matches the filename" in text
+    # And the file can still be used without picking any of them.
+    assert "No film — settings from the file alone" in text
+
+
+def test_the_file_is_only_read_once_across_both_steps(tmp_path: Path) -> None:
+    """Picking a file and then picking its film is one ffprobe, not two."""
+    film = film_in(tmp_path)
+    tmdb, _ = tmdb_transport()
+    runner, calls = counting()
+    client = client_for(tmdb=tmdb, tmdb_api_key="key", library_root=tmp_path, runner=runner)
+
+    client.post("/file", data={"path": str(film)})
+    client.post("/pick", data={"tmdb_id": "78", "path": str(film)})
+
+    assert len(calls) == 1
+    assert str(film.resolve()) in calls[0]
+
+
+def test_a_failing_ffprobe_is_reported_rather_than_half_a_form(tmp_path: Path) -> None:
+    film = film_in(tmp_path)
+    client = client_for(
+        library_root=tmp_path, runner=probing(code=1, out="", err="moov atom not found")
+    )
+
+    response = client.post("/file", data={"path": str(film)})
+
+    assert response.status_code == 200
+    assert "moov atom not found" in response.text
+    assert "paste its output instead" in response.text
+    # Not a step 2 built on nothing.
+    assert 'hx-post="/advise"' not in response.text
+
+
+def test_a_dead_tmdb_does_not_cost_the_file(tmp_path: Path) -> None:
+    film = film_in(tmp_path)
+    tmdb, _ = tmdb_transport(search=json_response({}, 503))
+    client = client_for(tmdb=tmdb, tmdb_api_key="key", library_root=tmp_path, runner=probing())
+
+    response = client.post("/file", data={"path": str(film)})
+
+    assert response.status_code == 200
+    assert "TMDB returned HTTP 503." in response.text
+    assert "3840×2160" in response.text
+    assert "No film — settings from the file alone" in response.text
+
+
+def test_without_a_key_the_file_is_still_read(tmp_path: Path) -> None:
+    film = film_in(tmp_path)
+
+    response = client_for(library_root=tmp_path, runner=probing()).post(
+        "/file", data={"path": str(film)}
+    )
+
+    assert "No TMDB key" in response.text
+    assert "3840×2160" in response.text
+
+
+def test_a_hit_and_a_file_together_reach_step_two(tmp_path: Path) -> None:
+    film = film_in(tmp_path)
+    tmdb, _ = tmdb_transport()
+    client = client_for(tmdb=tmdb, tmdb_api_key="key", library_root=tmp_path, runner=probing())
+
+    response = client.post("/pick", data={"tmdb_id": "78", "path": str(film)})
+
+    assert response.status_code == 200
+    text = response.text
+    assert "Ridley Scott" in text
+    # The source is described and its JSON is in the same field a paste would fill.
+    assert "3840×2160" in text
+    assert "What ffprobe said" in text
+    assert '<option value="ffprobe" selected>' in text
+    fields = submitted(text)
+    assert fields["input_path"] == str(film.resolve())
+    assert json.loads(fields["source_text"])["streams"]
+    assert fields["tmdb_id"] == "78"
+
+
+def test_advice_from_a_browsed_file_is_built_on_its_numbers(tmp_path: Path) -> None:
+    """End to end through the rendered form, so nothing is assumed about the plumbing."""
+    film = film_in(tmp_path)
+    tmdb, _ = tmdb_transport()
+    client = client_for(tmdb=tmdb, tmdb_api_key="key", library_root=tmp_path, runner=probing())
+
+    step_two = client.post("/pick", data={"tmdb_id": "78", "path": str(film)}).text
+    response = client.post("/advise", data=submitted(step_two))
+
+    assert response.status_code == 200
+    text = response.text
+    assert "3840×2160" in text
+    assert "blade-runner-1982-2160p.av1.mkv" in text
+    # The command re-encodes the file that was picked, quoted as one argument.
+    assert f"-i {film.resolve()}" in text
+
+
+def test_the_no_film_row_carries_the_year_out_of_the_filename(tmp_path: Path) -> None:
+    film = film_in(tmp_path)
+    client = client_for(library_root=tmp_path, runner=probing())
+
+    response = client.post("/pick", data={"path": str(film)})
+
+    assert response.status_code == 200
+    text = response.text
+    assert FILM_NAME in text
+    assert "carry on without identifying the film" in text
+    assert "the year in the filename" in text
+    fields = submitted(text)
+    assert fields["fallback_year"] == "1982"
+    assert fields["output_stem"] == "blade-runner-1982-2160p"
+    assert "tmdb_id" not in fields
+    # The id can still be typed in, which is all the negative format needs.
+    assert 'name="imdb_id"' in text
+
+
+def test_advice_without_a_film_still_answers_from_the_file(tmp_path: Path) -> None:
+    film = film_in(tmp_path)
+    client = client_for(library_root=tmp_path, runner=probing())
+
+    step_two = client.post("/pick", data={"path": str(film)}).text
+    response = client.post("/advise", data=submitted(step_two))
+
+    assert response.status_code == 200
+    text = response.text
+    assert "libsvtav1" in text
+    assert "3840×2160" in text
+    assert "blade-runner-1982-2160p.av1.mkv" in text
+
+
+def test_picking_neither_a_film_nor_a_file_says_so(client: TestClient) -> None:
+    response = client.post("/pick", data={})
+
+    assert response.status_code == 200
+    assert "Nothing was picked." in response.text
 
 
 # --- step 2: pick the film ---------------------------------------------------
@@ -601,10 +875,19 @@ def test_control_characters_never_reach_a_command(client: TestClient) -> None:
 
 
 def test_an_absurd_path_is_truncated(client: TestClient) -> None:
-    response = client.post("/advise", data={"input_path": "x" * 400})
+    """A path gets a path's length — a browsed file puts its whole ``/mnt/...`` there."""
+    response = client.post("/advise", data={"input_path": "x" * 2000})
 
-    assert "x" * 240 in response.text
-    assert "x" * 241 not in response.text
+    assert "x" * 1024 in response.text
+    assert "x" * 1025 not in response.text
+
+
+def test_an_absurd_output_name_is_truncated(client: TestClient) -> None:
+    """The output name is a filename, not a path, so it keeps the shorter limit."""
+    response = client.post("/advise", data={"output_stem": "y" * 400})
+
+    assert "y" * 240 in response.text
+    assert "y" * 241 not in response.text
 
 
 # --- the preset download -----------------------------------------------------

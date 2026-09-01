@@ -17,16 +17,20 @@ has to be a year that has actually happened. That last rule is what keeps
 from 2049 called "Blade Runner": 2049 is rejected, no year is found, and the title comes
 back as "Blade Runner 2049", which is the correct answer.
 
-Nothing here is certain, which is why the CLI always shows what it guessed and offers to
-be told otherwise.
+Nothing here is certain, which is why both front-ends always show what they guessed and
+offer to be told otherwise. :func:`best_hit` is the other half of that: given the search
+results, it picks the one the filename's year agrees with.
 """
 
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+
+from app.models import MovieHit
 
 # Hyphens split too: it is how a release group hangs off the end (``x265-RARBG``), and
 # a title that loses one to a space (``Spider-Man`` → ``Spider Man``) still searches.
@@ -123,6 +127,31 @@ def guess_name(path: Path, *, max_year: int | None = None) -> NameGuess:
         return NameGuess(title=" ".join(tokens[:index]), year=int(tokens[index]), source=source)
 
     return NameGuess(title=" ".join(_without_release_tail(tokens, stem)), year=None, source=source)
+
+
+# --- matching the guess against what was searched for -----------------------
+
+
+def best_hit(hits: Sequence[MovieHit], year: int | None) -> MovieHit:
+    """The hit the filename's year agrees with, or TMDB's own first answer."""
+    if year is not None:
+        matching = next((hit for hit in hits if hit.year == year), None)
+        if matching is not None:
+            return matching
+    return hits[0]
+
+
+def filename_first(hits: Sequence[MovieHit], year: int | None) -> list[MovieHit]:
+    """``hits`` with :func:`best_hit` moved to the front, TMDB's order otherwise kept.
+
+    The terminal puts its cursor on that row; a page has no cursor, so it puts the row
+    first instead. Same rule, so the two front-ends agree about which film a filename
+    is claiming.
+    """
+    if not hits:
+        return []
+    best = best_hit(hits, year)
+    return [best, *(hit for hit in hits if hit is not best)]
 
 
 # --- internals --------------------------------------------------------------

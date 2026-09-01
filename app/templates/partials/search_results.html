@@ -2,7 +2,25 @@
 {# Picking a new film invalidates whatever advice is on screen. #}
 <section id="advice" hx-swap-oob="true"></section>
 
-{% if not hits %}
+{% if file %}
+  {# A browsed file. It has already been read, so the film is the only open question —
+     and even that one can be left unanswered. #}
+  <div class="card source-file">
+    <h2>{{ file.name }}</h2>
+    <p class="muted path"><code>{{ file }}</code></p>
+    <p class="summary">{{ media.describe() }}</p>
+    <p class="muted">
+      Read with <code>ffprobe</code> on the server. The filename says
+      <strong>{{ guess.describe() }}</strong>.
+    </p>
+  </div>
+{% endif %}
+
+{% if note %}
+  <div class="card notice">
+    <p>{{ note }}</p>
+  </div>
+{% elif not hits %}
   <div class="card notice">
     <h2>Nothing found</h2>
     <p>
@@ -10,7 +28,9 @@
       title, or drop the year.
     </p>
   </div>
-{% else %}
+{% endif %}
+
+{% if hits %}
   <div class="card">
     <h2>{{ hits | length }} match{{ "es" if hits | length != 1 }} for “{{ query }}”</h2>
     <ul class="hits">
@@ -25,6 +45,9 @@
             <h3>
               {{ hit.title }}
               {% if hit.year %}<span class="muted">({{ hit.year }})</span>{% endif %}
+              {% if guess and guess.year and hit.year == guess.year %}
+                <span class="badge">matches the filename</span>
+              {% endif %}
             </h3>
             {% if hit.original_title and hit.original_title != hit.title %}
               <p class="muted original">{{ hit.original_title }}</p>
@@ -37,10 +60,24 @@
             hx-indicator="#spinner"
           >
             <input type="hidden" name="tmdb_id" value="{{ hit.tmdb_id }}" />
+            {% if file %}<input type="hidden" name="path" value="{{ file }}" />{% endif %}
             <button type="submit">This one</button>
           </form>
         </li>
       {% endfor %}
     </ul>
+  </div>
+{% endif %}
+
+{% if file %}
+  <div class="card no-film">
+    <form hx-post="/pick" hx-target="#results" hx-indicator="#spinner">
+      <input type="hidden" name="path" value="{{ file }}" />
+      <button type="submit" class="secondary">No film — settings from the file alone</button>
+    </form>
+    <p class="muted">
+      The grain is then guessed from the year in the filename rather than from what the
+      film was shot on, which is the one thing a file cannot tell us.
+    </p>
   </div>
 {% endif %}

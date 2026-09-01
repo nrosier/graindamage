@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from app.cli.filename import guess_name
+from app.filename import guess_name
 
 # (filename, expected title, expected year)
 NAMES: list[tuple[str, str, int | None]] = [

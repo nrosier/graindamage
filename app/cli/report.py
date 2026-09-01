@@ -15,7 +15,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Iterator
 from pathlib import Path
 
-from app.models import Advice, AdviceSource, EncodeRequest, EncoderPlan, Movie, SourceMedia
+from app.models import Advice, AdviceSource, EncodeRequest, EncoderPlan, Movie
 
 INDENT = "  "
 # Wide enough for "HandBrake", which is the longest label a plan line takes.
@@ -100,7 +100,7 @@ def _film(movie: Movie | None) -> Iterator[str]:
 
 
 def _facts(advice: Advice, request: EncodeRequest, specs_caveat: str | None) -> Iterator[str]:
-    yield f"Source   {source_summary(request.source)}"
+    yield f"Source   {request.source.describe()}"
     # Who decided, on its own line: everything below reads the same either way, and the
     # difference between a decision made for this film and a table lookup is the single
     # most important thing to know before acting on any of it. The notes carry the rest.
@@ -124,47 +124,6 @@ def _decided_by(source: AdviceSource) -> str:
     if source is AdviceSource.GEMINI:
         return "decided by Gemini for this film"
     return "from tables — nothing read this film (see Notes)"
-
-
-def source_summary(media: SourceMedia) -> str:
-    """One line describing the file, shared with the header of the written script."""
-    parts: list[str] = []
-    video = media.video
-    if video is not None:
-        if video.width and video.height:
-            parts.append(f"{video.width}×{video.height}")
-        if video.codec:
-            parts.append(video.codec)
-        if video.bit_depth:
-            parts.append(f"{video.bit_depth}-bit")
-        if video.is_hdr:
-            parts.append("HDR")
-        if video.dolby_vision:
-            parts.append("Dolby Vision")
-        if video.is_interlaced:
-            parts.append("interlaced")
-        if video.frame_rate:
-            parts.append(f"{video.frame_rate:.3f} fps")
-        if video.bitrate_bps:
-            parts.append(f"{video.bitrate_bps / 1_000_000:.1f} Mb/s")
-    else:
-        parts.append("no video track")
-
-    if media.duration_seconds:
-        parts.append(_duration(media.duration_seconds))
-    if media.size_bytes:
-        parts.append(f"{media.size_bytes / 1_000_000_000:.1f} GB")
-    if media.audio:
-        parts.append(f"{len(media.audio)} audio")
-    if media.subtitles:
-        parts.append(f"{len(media.subtitles)} subtitle")
-    return " · ".join(parts)
-
-
-def _duration(seconds: float) -> str:
-    minutes, _ = divmod(int(seconds), 60)
-    hours, minutes = divmod(minutes, 60)
-    return f"{hours}h {minutes:02d}m" if hours else f"{minutes}m"
 
 
 def _plan(plan: EncoderPlan) -> Iterator[str]:

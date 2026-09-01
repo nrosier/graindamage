@@ -44,10 +44,12 @@ Built in milestones; all eight are done (v0.8.0).
 Three steps in one page, each swapped in over HTMX:
 
 1. **Find the film.** TMDB search (IMDb has no public API); the hit you pick supplies
-   its `imdb_id`, which is what finds the negative format.
-2. **Describe the source.** Paste `ffprobe`, `mkvinfo` or `mediainfo` output. The
-   IMDb technical rows arrive from a Gemini look-up, or you paste those too. Every
-   field is overridable by hand.
+   its `imdb_id`, which is what finds the negative format. Or [pick a file out of your
+   library](#pick-a-file-instead-of-pasting) and let the filename do the searching.
+2. **Describe the source.** Paste `ffprobe`, `mkvinfo` or `mediainfo` output — or skip
+   it, because a file picked in step 1 has already been read. The IMDb technical rows
+   arrive from a Gemini look-up, or you paste those too. Every field is overridable by
+   hand.
 3. **Get the settings.** Two plans — SVT-AV1 and x265 — each with a CRF and the named
    factors that add up to it, a preset, a validated parameter string, a HandBrake
    command, an FFmpeg command, and a downloadable HandBrake preset.
@@ -150,6 +152,28 @@ warning, never an error. Paste whichever you have.
 | **MediaInfo** | `mediainfo in.mkv`                                                  | Any container; human-readable text, locale-dependent number formatting    |
 
 The format is detected from the paste, so there is nothing to select.
+
+### Pick a file instead of pasting
+
+If your library is mounted at `/mnt`, step 1 has a second door: **browse it**. Open a
+directory, pick a film, and the server runs `ffprobe` on it and reads the filename the way
+the command line does — `guess_name`, then a TMDB search for that title with the hit whose
+year agrees listed first and badged *matches the filename*. Step 2 then arrives already
+describing your file, with ffprobe's own JSON in the paste box (editable, in a
+`<details>`), the full path in the FFmpeg command's `-i`, and an output name built from the
+film. It is the same pipeline the CLI walks; only the terminal is missing.
+
+As in the CLI's step 1, a film is optional: **No film — settings from the file alone**
+carries the file forward on its own, and the grain estimate falls back on the year in the
+filename. Type an IMDb id in step 2 and the negative format comes back with it.
+
+`/mnt` is the only path served, and it is not configurable — the mount is what points it at
+your films. Every path a form submits is resolved before it is compared against `/mnt`, so
+a symlink pointing out of the library is refused rather than followed; a library that *is*
+a tree of symlinks therefore cannot be browsed this way, which is the right way round.
+Only the containers in the table above (plus `.avi`, `.ts`, `.m2ts`, `.vob` and friends)
+are offered, so no route can hand `ffprobe` an arbitrary file. Without the mount the panel
+is absent and `/healthz` reports `library_browse: false`.
 
 ### Is mkvinfo a good alternative to ffprobe?
 
@@ -303,6 +327,10 @@ starts with an empty config, the home page reports which integrations are active
 | `USER_AGENT`                   | `graindamage/0.8 …`              | Sent on every outbound request                                 |
 | `DEBUG`                        | `false`                          | Verbose errors                                                 |
 
+There is deliberately no variable for the browsable library: `/mnt` is fixed in the code,
+and mounting your films there is what turns the panel on. See [Pick a file instead of
+pasting](#pick-a-file-instead-of-pasting).
+
 Secrets are read from the environment only and never logged. The Gemini key travels in
 an `x-goog-api-key` header rather than a query string, so it cannot land in a proxy
 log. `.env` is gitignored, and CI scans the history for leaked secrets.
@@ -314,6 +342,8 @@ log. `.env` is gitignored, and CI scans the history for leaked secrets.
 | `/`          | GET    | The page                                                         |
 | `/healthz`   | GET    | `{"status": "ok", "version": …, "capabilities": {…}}`            |
 | `/search`    | POST   | Search results partial                                           |
+| `/browse`    | GET    | One directory of `/mnt`, as a listing partial                    |
+| `/file`      | POST   | A picked file, probed, with the hits its filename found          |
 | `/pick`      | POST   | The film, its IMDb specs, and the source form                    |
 | `/technical` | POST   | The IMDb specs partial, from a Gemini look-up                    |
 | `/advise`    | POST   | Both plans, with commands                                        |
@@ -559,8 +589,12 @@ report, never the settings.
 docker compose up --build      # http://localhost:8080
 ```
 
-`compose.yaml` also mounts your films at `/media` — set `MEDIA_DIR` in `.env` to point it
-at your library — so that the command line inside the container has something to work on.
+`compose.yaml` mounts your films twice, from one `MEDIA_DIR` in `.env`: read-write at
+`/media`, so the command line inside the container can write the two files beside a film,
+and read-only at `/mnt`, which is the one path [the web UI
+browses](#pick-a-file-instead-of-pasting). Both have to be readable by the `app` user the
+image runs as. Without the `/mnt` mount the browse panel is simply absent, and the web UI
+works as it always did.
 
 Or without compose:
 
@@ -661,6 +695,9 @@ app/
   config.py             environment-backed settings + capability reporting
   models.py             the domain: tracks, specs, plans, advice
   cache.py              async TTL cache, one per provider
+  filename.py           Movie.Title.1982.2160p… → title and year, for both front-ends
+  probe.py              ffprobe as a subprocess, never a shell
+  library.py            what is on a mount, and what a form is allowed to name
   advice/
     grain.py            negative format and process → grain profile
     rules.py            the offline fallback: CRF, preset, parameters from tables
@@ -671,8 +708,6 @@ app/
     app.py              the argparse surface and the run itself
     wizard.py           the four steps, and the file picker when given none
     session.py          what both paths share: clients, rows, the two exceptions
-    filename.py         Movie.Title.1982.2160p… → title and year
-    probe.py            ffprobe as a subprocess, never a shell
     prompts.py          the arrow-key picker, and its numbered fallback
     report.py           the advice as terminal text
     outputs.py          the .json preset and the .sh script it writes

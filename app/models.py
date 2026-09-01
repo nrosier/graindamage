@@ -279,6 +279,51 @@ class SourceMedia(BaseModel):
             return "1440p"
         return "2160p"
 
+    def describe(self) -> str:
+        """One line describing the file: what it is, how long, how big.
+
+        Shared by everything that has to name a source — the header of the written
+        script, the terminal's summary line, and the web page's file rows — so a file
+        reads the same wherever it is mentioned.
+        """
+
+        def duration(seconds: float) -> str:
+            minutes, _ = divmod(int(seconds), 60)
+            hours, minutes = divmod(minutes, 60)
+            return f"{hours}h {minutes:02d}m" if hours else f"{minutes}m"
+
+        parts: list[str] = []
+        video = self.video
+        if video is not None:
+            if video.width and video.height:
+                parts.append(f"{video.width}×{video.height}")
+            if video.codec:
+                parts.append(video.codec)
+            if video.bit_depth:
+                parts.append(f"{video.bit_depth}-bit")
+            if video.is_hdr:
+                parts.append("HDR")
+            if video.dolby_vision:
+                parts.append("Dolby Vision")
+            if video.is_interlaced:
+                parts.append("interlaced")
+            if video.frame_rate:
+                parts.append(f"{video.frame_rate:.3f} fps")
+            if video.bitrate_bps:
+                parts.append(f"{video.bitrate_bps / 1_000_000:.1f} Mb/s")
+        else:
+            parts.append("no video track")
+
+        if self.duration_seconds:
+            parts.append(duration(self.duration_seconds))
+        if self.size_bytes:
+            parts.append(f"{self.size_bytes / 1_000_000_000:.1f} GB")
+        if self.audio:
+            parts.append(f"{len(self.audio)} audio")
+        if self.subtitles:
+            parts.append(f"{len(self.subtitles)} subtitle")
+        return " · ".join(parts)
+
 
 class SourceReport(BaseModel):
     """A parse result plus an honest account of what could not be determined."""

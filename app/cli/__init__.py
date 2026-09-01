@@ -9,11 +9,12 @@ beside it.
 and :mod:`app.cli.wizard` holds the menus a person gets instead of the flags. The two
 would import each other, so what they share (the clients, the prose, the specs a paste
 or a file turned into) lives in :mod:`app.cli.session`. The rest is one concern each:
-:mod:`~app.cli.filename` reads names, :mod:`~app.cli.probe` runs ffprobe,
 :mod:`~app.cli.prompts` moves a cursor over a list, :mod:`~app.cli.report` and
 :mod:`~app.cli.outputs` write the answer down.
 
-Nothing here is imported by the web app, and only :mod:`app.cli.probe` starts a process.
+Everything here needs a terminal. What does not — reading a title out of a filename,
+running ``ffprobe``, finding video files on a mount — sits in :mod:`app.filename`,
+:mod:`app.probe` and :mod:`app.library`, because the web front-end does those too.
 """
 
 from __future__ import annotations

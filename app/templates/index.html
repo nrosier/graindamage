@@ -32,6 +32,37 @@
   {% endif %}
 </section>
 
+<section class="card">
+  <h2>Or pick a file from {{ root }}</h2>
+  {% if capabilities.library_browse %}
+    <p class="muted intro">
+      Browse the library for a film, and the file is read with <code>ffprobe</code> here
+      rather than by you — then the title and year in its name are searched for, exactly
+      as the command-line version does it. Only {{ root }} is served, and a link pointing
+      out of it is refused.
+    </p>
+    <p class="row">
+      <button
+        type="button"
+        class="secondary"
+        hx-get="/browse"
+        hx-target="#browser"
+        hx-indicator="#browse-spinner"
+      >
+        Browse {{ root }}
+      </button>
+      <span id="browse-spinner" class="spinner" aria-hidden="true">reading…</span>
+    </p>
+    {# Empty until asked, so opening the page costs no disk at all. #}
+    <div id="browser"></div>
+  {% else %}
+    <p class="muted">
+      Nothing is mounted at <code>{{ root }}</code>, so there is nothing to browse. Mount
+      your library there to pick files instead of pasting <code>ffprobe</code> output.
+    </p>
+  {% endif %}
+</section>
+
 <section id="results" aria-live="polite"></section>
 <section id="advice" aria-live="polite"></section>
 
@@ -51,6 +82,14 @@
       <span>
         {{ "configured" if capabilities.gemini_advice
            else "set GEMINI_API_KEY to enable — without it you get the table fallback" }}
+      </span>
+    </li>
+    <li class="{{ 'on' if capabilities.library_browse else 'off' }}">
+      <strong>Library browsing</strong>
+      <span>
+        {{ "mounted — files are read with ffprobe on the server"
+           if capabilities.library_browse
+           else "mount your films at " ~ root ~ " to pick them instead of pasting" }}
       </span>
     </li>
     <li class="{{ 'on' if capabilities.imdb_technical_lookup else 'off' }}">

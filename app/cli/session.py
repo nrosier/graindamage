@@ -17,10 +17,10 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from app.cli.probe import Runner
 from app.cli.prompts import Terminal
 from app.config import Settings, get_settings
 from app.models import MovieHit, SpecsSource, TechnicalSpecs
+from app.probe import Runner
 from app.providers.gemini import GeminiClient
 from app.providers.imdb import parse_technical
 from app.providers.tmdb import TmdbClient
@@ -109,15 +109,6 @@ def film_detail(hit: MovieHit, year: int | None) -> str:
     """The right-hand half of a film's row: its year, and whether the file agrees."""
     detail = str(hit.year) if hit.year else "year unknown"
     return f"{detail}  · matches the filename" if year and hit.year == year else detail
-
-
-def best_hit(hits: list[MovieHit], year: int | None) -> MovieHit:
-    """The hit the filename's year agrees with, or TMDB's own first answer."""
-    if year is not None:
-        matching = next((hit for hit in hits if hit.year == year), None)
-        if matching is not None:
-            return matching
-    return hits[0]
 
 
 # --- the technical rows ----------------------------------------------------

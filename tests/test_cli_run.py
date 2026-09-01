@@ -20,16 +20,23 @@ import pytest
 
 from app.cli.app import EXIT_ABORTED, EXIT_OK, EXIT_SETUP, main
 from app.cli.outputs import PRESET_SUFFIX, SCRIPT_SUFFIX
-from app.cli.probe import Runner
 from app.cli.prompts import Choice, Terminal
 from app.cli.session import Context
 from app.config import Settings
+from app.probe import Runner
 from app.providers.gemini import GeminiClient
 from app.providers.tmdb import TmdbClient
-from tests.support import fixture, gemini_answer, json_response, make_settings, mock_client
 
-FILM_NAME = "Blade.Runner.1982.2160p.BluRay.x265-GRP.mkv"
-FFPROBE_REPORT = fixture("ffprobe_uhd_hdr.json")
+# The film, the stub ffprobe and its fixture live in support.py: the web tests probe the
+# same file, and one double keeps the two front-ends from drifting on what they were shown.
+from tests.support import (
+    film_in,
+    gemini_answer,
+    json_response,
+    make_settings,
+    mock_client,
+    probing,
+)
 
 # The technical page as it reads on screen, which is what a person pastes.
 PASTED_PAGE = """Technical specifications
@@ -65,19 +72,6 @@ NO_ROWS: dict[str, Any] = {"confidence": "low"}
 
 
 # --- the doubles ------------------------------------------------------------
-
-
-def film_in(directory: Path, name: str = FILM_NAME) -> Path:
-    path = directory / name
-    path.write_bytes(b"not really a film, and ffprobe is a stub")
-    return path
-
-
-def probing(code: int = 0, out: str = FFPROBE_REPORT, err: str = "") -> Runner:
-    async def runner(args: Sequence[str], timeout: float) -> tuple[int, str, str]:
-        return code, out, err
-
-    return runner
 
 
 def tmdb_transport(

@@ -13,6 +13,13 @@ leave the user looking at an unchanged page and no explanation. The exception is
 Nothing in a route ever blocks the answer: a dead TMDB, a failed specs lookup or an
 unparseable paste each degrade to advice built from whatever survived, with a warning
 saying what was lost.
+
+Step 1 has two doors. One is a title search. The other browses the library mount and runs
+``ffprobe`` on the file you pick, which is what the CLI does with the path it is given —
+same filename reading, same TMDB search, same year matching. Every path a form submits
+goes through :mod:`app.library` first, and what ffprobe said travels onward in the form's
+own ``source_text`` field, so from step 2 down there is one flow and it never touches the
+filesystem again.
 """
 
 from __future__ import annotations
@@ -20,6 +27,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from enum import StrEnum
+from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Form, Request
@@ -27,21 +35,27 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from starlette.datastructures import FormData
 
-from app import __version__
+from app import __version__, library
 from app.advice import finish_advice, render_handbrake_preset
+from app.cache import TTLCache
 from app.config import Settings
+from app.filename import NameGuess, filename_first, guess_name
 from app.models import (
     Advice,
     Encoder,
     EncodeRequest,
     GrainLevel,
     Movie,
+    MovieHit,
     SizePreference,
+    SourceMedia,
+    SourceReport,
     SourceTool,
     SpecsSource,
     SpeedPreference,
     TechnicalSpecs,
 )
+from app.probe import ProbeFailed, Runner, probe_text, read_probe_text
 from app.providers import ProviderDisabled, ProviderError
 from app.providers.gemini import GeminiClient
 from app.providers.imdb import parse_technical
@@ -53,12 +67,36 @@ from app.sources import MAX_INPUT_CHARS, UnknownSourceFormat, parse_source
 MAX_TECHNICAL_CHARS = 4_000_000
 MAX_PATH_CHARS = 240
 MAX_QUERY_CHARS = 200
+# A browsed path is a whole path, not the filename that ends up in a command line.
+MAX_BROWSE_CHARS = 1024
+
+# A probe is cached against the file's identity rather than for a quota's sake, so it
+# keeps its own short life: long enough to carry one pick through step 2, not so long
+# that a file replaced in place is described by the file it replaced.
+PROBE_TTL_SECONDS = 600.0
 
 # A lookup that honestly does not know beats one that invents rows, but the user
 # still has to be told what to do next.
 NO_ROWS_FOUND = (
     "Gemini did not have the technical rows for this title. Open the technical page "
     "linked above and paste the specifications to get grain-accurate advice."
+)
+
+OUTSIDE_LIBRARY = (
+    f"Only files under {library.LIBRARY_ROOT} can be opened, and a link out of it counts "
+    f"as out of it."
+)
+PROBE_HELP = (
+    "Run ffprobe on the file yourself and paste its output instead — search for the film "
+    "by title above, and the box is on the next page."
+)
+NO_TMDB_KEY_FILE = (
+    "No TMDB key (TMDB_API_KEY), so the film was not looked up. Carry on with the file "
+    "alone, or set the key to have the title searched for."
+)
+NOTHING_IN_THE_NAME = (
+    "There is no title in that filename, so nothing was searched for. Carry on with the "
+    "file alone, or search by title above."
 )
 
 _UNSAFE_FILENAME = re.compile(r"[^A-Za-z0-9._-]+")
@@ -68,12 +106,26 @@ _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 
 @dataclass(slots=True)
 class Services:
-    """The long-lived collaborators. Built once per app so their caches survive."""
+    """The long-lived collaborators. Built once per app so their caches survive.
+
+    ``library_root`` and ``runner`` are seams rather than settings: the root is fixed at
+    :data:`app.library.LIBRARY_ROOT` for anything that ships, and the tests point them at
+    a temporary directory and a stub ffprobe.
+    """
 
     settings: Settings
     templates: Jinja2Templates
     tmdb: TmdbClient
     gemini: GeminiClient
+    library_root: Path = library.LIBRARY_ROOT
+    runner: Runner | None = None
+    probes: TTLCache[str] = field(
+        default_factory=lambda: TTLCache[str](ttl_seconds=PROBE_TTL_SECONDS)
+    )
+
+    def capabilities(self) -> dict[str, bool]:
+        """What is wired up, including whether there is a library mounted to browse."""
+        return self.settings.capabilities() | {"library_browse": self.library_root.is_dir()}
 
 
 # --- form handling ----------------------------------------------------------
@@ -143,6 +195,9 @@ class AdviceInputs:
     output_stem: str = ""
     use_gemini: bool = True
     encoder: Encoder = Encoder.SVT_AV1
+    # The year a filename claimed, for when no film was picked and the grain heuristic
+    # has nothing else to go on.
+    fallback_year: int | None = None
 
     @classmethod
     def from_form(cls, form: FormData) -> AdviceInputs:
@@ -157,10 +212,12 @@ class AdviceInputs:
             bit_depth_override=_bit_depth(form.get("bit_depth_override")),
             speed=_enum_or_default(form, "speed", SpeedPreference, SpeedPreference.BALANCED),
             size=_enum_or_default(form, "size", SizePreference, SizePreference.BALANCED),
-            input_path=_one_line(_text(form, "input_path", MAX_PATH_CHARS), MAX_PATH_CHARS),
+            # A browsed file puts its whole path here, so this one is a path's length.
+            input_path=_one_line(_text(form, "input_path", MAX_BROWSE_CHARS), MAX_BROWSE_CHARS),
             output_stem=_one_line(_text(form, "output_stem", MAX_PATH_CHARS), MAX_PATH_CHARS),
             use_gemini=_checked(form, "use_gemini"),
             encoder=_enum_or_default(form, "encoder", Encoder, Encoder.SVT_AV1),
+            fallback_year=_int_or_none(form.get("fallback_year")),
         )
 
     def hidden_fields(self) -> dict[str, str]:
@@ -192,6 +249,8 @@ class AdviceInputs:
             fields["grain_override"] = self.grain_override.value
         if self.bit_depth_override is not None:
             fields["bit_depth_override"] = str(self.bit_depth_override)
+        if self.fallback_year is not None:
+            fields["fallback_year"] = str(self.fallback_year)
         return fields
 
 
@@ -285,6 +344,7 @@ async def _assemble(services: Services, inputs: AdviceInputs) -> Assembled:
         bit_depth_override=inputs.bit_depth_override,
         speed=inputs.speed,
         size=inputs.size,
+        fallback_year=inputs.fallback_year,
     )
 
     if inputs.source_text.strip():
@@ -331,13 +391,61 @@ async def _advise(services: Services, inputs: AdviceInputs) -> tuple[Advice, Ass
     return advice, assembled
 
 
+# --- the library, and what ffprobe says about a file in it -------------------
+
+
+async def _probe(services: Services, path: Path) -> tuple[str, SourceReport]:
+    """ffprobe's own JSON for ``path``, and the parse of it.
+
+    Cached against the file's identity rather than its name, so picking a file and then
+    picking its film runs ffprobe once, and a file replaced in place is described afresh.
+    """
+    stat = path.stat()
+    key = (str(path), stat.st_mtime_ns, stat.st_size)
+    text = await services.probes.get_or_set(key, lambda: probe_text(path, runner=services.runner))
+    return text, read_probe_text(text)
+
+
+async def _search_for_guess(
+    services: Services, guess: NameGuess
+) -> tuple[list[MovieHit], str | None]:
+    """The hits for what a filename appears to say, or why there are none.
+
+    Never an error: a file that was read is enough to finish on, as the CLI's own step 1
+    is, so every failure here is a note beside the hits rather than instead of them.
+    """
+    if not services.settings.tmdb_api_key:
+        return [], NO_TMDB_KEY_FILE
+    if not guess.query:
+        return [], NOTHING_IN_THE_NAME
+    try:
+        hits = await services.tmdb.search(guess.query)
+    except ProviderError as exc:
+        return [], exc.message
+    if not hits:
+        return [], (
+            f"TMDB has nothing for {guess.query!r}. Search by title above, or carry on "
+            f"with the file alone."
+        )
+    return filename_first(hits, guess.year), None
+
+
+def _file_stem(guess: NameGuess, media: SourceMedia) -> str:
+    """A name for the output when no film was picked, built from what the file says."""
+    parts = [_slug(guess.title) or "output"]
+    if guess.year:
+        parts.append(str(guess.year))
+    if label := media.resolution_label:
+        parts.append(label.casefold())
+    return "-".join(parts)
+
+
 # --- router -----------------------------------------------------------------
 
 
 def create_router(services: Services) -> APIRouter:
     router = APIRouter()
     templates = services.templates
-    settings = services.settings
 
     def render(request: Request, name: str, context: dict[str, Any]) -> HTMLResponse:
         return templates.TemplateResponse(request, name, context)
@@ -358,7 +466,7 @@ def create_router(services: Services) -> APIRouter:
         return {
             "status": "ok",
             "version": __version__,
-            "capabilities": settings.capabilities(),
+            "capabilities": services.capabilities(),
         }
 
     @router.get("/", response_class=HTMLResponse)
@@ -366,7 +474,7 @@ def create_router(services: Services) -> APIRouter:
         return render(
             request,
             "index.html",
-            {"capabilities": settings.capabilities(), "step": 1},
+            {"capabilities": services.capabilities(), "root": services.library_root, "step": 1},
         )
 
     @router.post("/search", response_class=HTMLResponse)
@@ -398,20 +506,122 @@ def create_router(services: Services) -> APIRouter:
             {"query": term, "hits": hits, "step": 1, "oob": True},
         )
 
+    @router.get("/browse", response_class=HTMLResponse)
+    async def browse(request: Request, path: str = "") -> HTMLResponse:
+        """One directory under the library root. Empty ``path`` means the root itself."""
+        root = services.library_root
+        try:
+            here = library.directory_in(root, path[:MAX_BROWSE_CHARS])
+        except library.OutsideLibrary as exc:
+            return error(request, str(exc), help_text=OUTSIDE_LIBRARY)
+        except library.NotUsable as exc:
+            return error(request, str(exc))
+        except OSError as exc:
+            return error(request, f"{root} could not be read.", detail=str(exc))
+
+        try:
+            listing = library.list_directory(root, here)
+        except OSError as exc:
+            return error(request, f"{here} could not be read.", detail=str(exc))
+
+        return render(request, "partials/browse.html", {"listing": listing, "root": root})
+
+    @router.post("/file", response_class=HTMLResponse)
+    async def file(request: Request, path: Annotated[str, Form()] = "") -> HTMLResponse:
+        """A file picked out of the library: probe it, then guess which film it is.
+
+        Exactly what ``graindamage /mnt/films/whatever.mkv`` does, minus the terminal.
+        """
+        try:
+            chosen = library.video_in(services.library_root, path[:MAX_BROWSE_CHARS])
+        except library.OutsideLibrary as exc:
+            return error(request, str(exc), help_text=OUTSIDE_LIBRARY)
+        except library.NotUsable as exc:
+            return error(request, str(exc), help_text=PROBE_HELP)
+
+        try:
+            _, report = await _probe(services, chosen)
+        except ProbeFailed as exc:
+            return error(request, str(exc), help_text=PROBE_HELP)
+        except OSError as exc:
+            return error(request, f"{chosen.name} could not be read.", detail=str(exc))
+
+        guess = guess_name(chosen)
+        hits, note = await _search_for_guess(services, guess)
+
+        return render(
+            request,
+            "partials/search_results.html",
+            {
+                "query": guess.query,
+                "hits": hits,
+                "file": chosen,
+                "guess": guess,
+                "media": report.media,
+                "note": note,
+                "step": 1,
+                "oob": True,
+            },
+        )
+
     @router.post("/pick", response_class=HTMLResponse)
     async def pick(
         request: Request,
-        tmdb_id: Annotated[int, Form()],
+        tmdb_id: Annotated[str, Form()] = "",
+        path: Annotated[str, Form()] = "",
     ) -> HTMLResponse:
-        try:
-            movie = await services.tmdb.get_movie(tmdb_id)
-        except ProviderError as exc:
-            return error(request, exc.message, detail=exc.detail)
+        """Step 2, reached from a search hit, from a browsed file, or from both.
+
+        The file, when there is one, arrives as ffprobe's own JSON in the form's
+        ``source_text`` — the same field a paste fills — so nothing below this touches
+        the filesystem again.
+        """
+        chosen: Path | None = None
+        source_text = ""
+        stem = ""
+        media: SourceMedia | None = None
+        guess: NameGuess | None = None
+        file_warning: str | None = None
+        if path:
+            try:
+                chosen = library.video_in(services.library_root, path[:MAX_BROWSE_CHARS])
+            except library.OutsideLibrary as exc:
+                return error(request, str(exc), help_text=OUTSIDE_LIBRARY)
+            except library.NotUsable as exc:
+                return error(request, str(exc), help_text=PROBE_HELP)
+
+            try:
+                source_text, report = await _probe(services, chosen)
+            except ProbeFailed as exc:
+                return error(request, str(exc), help_text=PROBE_HELP)
+            except OSError as exc:
+                return error(request, f"{chosen.name} could not be read.", detail=str(exc))
+            media = report.media
+            guess = guess_name(chosen)
+            stem = _file_stem(guess, media)
+
+        wanted = _int_or_none(tmdb_id)
+        movie: Movie | None = None
+        if wanted is not None:
+            try:
+                movie = await services.tmdb.get_movie(wanted)
+            except ProviderError as exc:
+                if chosen is None:
+                    return error(request, exc.message, detail=exc.detail)
+                # A file was read, so the run can still finish: say what was lost and
+                # let the settings be built from the file alone.
+                file_warning = exc.message
+        elif chosen is None:
+            return error(
+                request,
+                "Nothing was picked.",
+                help_text="Choose a film from the search results, or a file from the library.",
+            )
 
         specs = TechnicalSpecs()
         specs_caveat: str | None = None
         specs_error: str | None = None
-        if movie.imdb_id and services.gemini.enabled:
+        if movie and movie.imdb_id and services.gemini.enabled:
             specs, specs_caveat, specs_error = await _lookup_specs(
                 services, movie.imdb_id, title=movie.title, year=movie.year
             )
@@ -424,11 +634,22 @@ def create_router(services: Services) -> APIRouter:
                 "specs": specs,
                 "specs_caveat": specs_caveat,
                 "specs_error": specs_error,
-                "capabilities": settings.capabilities(),
+                "capabilities": services.capabilities(),
                 "grain_levels": list(GrainLevel),
                 "source_tools": list(SourceTool),
                 "speeds": list(SpeedPreference),
                 "sizes": list(SizePreference),
+                "file": chosen,
+                "guess": guess,
+                "media": media,
+                "source_text": source_text,
+                "source_tool": SourceTool.FFPROBE if chosen else None,
+                # A film names its own output better than a filename can, so only fall
+                # back to the file's name when there is no film.
+                "output_stem": "" if movie else stem,
+                "input_path": str(chosen) if chosen else "",
+                "fallback_year": guess.year if guess else None,
+                "file_warning": file_warning,
                 "step": 2,
                 "oob": True,
             },

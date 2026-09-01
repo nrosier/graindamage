@@ -35,10 +35,8 @@ from pathlib import Path
 
 from app import __version__
 from app.advice import infer_grain
-from app.cli.filename import NameGuess
 from app.cli.outputs import PRESET_SUFFIX, SCRIPT_SUFFIX, existing_outputs
 from app.cli.prompts import Choice, Terminal
-from app.cli.report import source_summary
 from app.cli.session import (
     GUESSED_FROM_YEAR,
     NO_ROWS_FOUND,
@@ -52,6 +50,8 @@ from app.cli.session import (
     specs_from_paste,
     technical_url,
 )
+from app.filename import NameGuess
+from app.library import LIKELY_ROOTS, MAX_FOUND, find_videos, human_size
 from app.models import (
     Encoder,
     GrainLevel,
@@ -303,7 +303,7 @@ class Wizard:
         self._say(f"graindamage {__version__} — {STEPS} steps to two files.")
         self._say()
         self._say(f"File     {self._path.name}")
-        self._say(f"Source   {source_summary(self._report.media)}")
+        self._say(f"Source   {self._report.media.describe()}")
         self._say(f"Name     {self._guess.describe()}")
 
     def _clash_step(self) -> None:
@@ -839,71 +839,19 @@ class Wizard:
 
 
 # --- the file, when the command was given none -------------------------------
-
-VIDEO_SUFFIXES = frozenset(
-    {
-        ".mkv",
-        ".mp4",
-        ".m4v",
-        ".mov",
-        ".avi",
-        ".ts",
-        ".m2ts",
-        ".mts",
-        ".webm",
-        ".mpg",
-        ".mpeg",
-        ".vob",
-        ".wmv",
-        ".flv",
-        ".ogv",
-    }
-)
-
-# Where a film is likely to be mounted in a container that has no argument to go on.
-LIKELY_ROOTS = ("/media", "/movies", "/films", "/video", "/videos", "/data", "/mnt")
-
-_MAX_FOUND = 20
-_MAX_DEPTH = 3
-
-
-def find_videos(root: Path, *, depth: int = _MAX_DEPTH, limit: int = _MAX_FOUND) -> list[Path]:
-    """Video files at or under ``root``, breadth-first and capped.
-
-    Breadth-first because a mount point's own files are the likely answer and its
-    twentieth subdirectory is not, and capped because this exists to fill a menu — a
-    library of nine thousand films is browsed by typing a path, not by scrolling.
-    """
-    found: list[Path] = []
-    queue: list[tuple[Path, int]] = [(root, 0)]
-    while queue and len(found) < limit:
-        directory, level = queue.pop(0)
-        try:
-            entries = sorted(directory.iterdir())
-        except OSError:  # unreadable, or gone since the listing above
-            continue
-        for entry in entries:
-            if entry.name.startswith("."):
-                continue
-            if entry.is_dir():
-                if level < depth:
-                    queue.append((entry, level + 1))
-            elif entry.suffix.lower() in VIDEO_SUFFIXES:
-                found.append(entry)
-                if len(found) >= limit:
-                    break
-    return found
+#
+# What is on disk lives in app.library, because the web app browses the same mounts.
 
 
 def likely_videos(cwd: Path) -> list[Path]:
     """What to offer someone who ran the command with no argument at all."""
     found = find_videos(cwd)
     for name in LIKELY_ROOTS:
-        if len(found) >= _MAX_FOUND:
+        if len(found) >= MAX_FOUND:
             break
         root = Path(name)
         if root.is_dir() and root != cwd:
-            found.extend(find_videos(root, limit=_MAX_FOUND - len(found)))
+            found.extend(find_videos(root, limit=MAX_FOUND - len(found)))
     return found
 
 
@@ -913,7 +861,8 @@ def choose_input(terminal: Terminal, *, cwd: Path | None = None) -> Path:
     while True:
         found = likely_videos(here)
         rows: list[Choice[Path | None]] = [
-            Choice(value=path, label=_relative(path, here), detail=_size(path)) for path in found
+            Choice(value=path, label=_relative(path, here), detail=human_size(path))
+            for path in found
         ]
         rows.append(Choice(value=None, label="Type the path to a file", detail="or a mount point"))
         prompt = (
@@ -943,18 +892,6 @@ def _relative(path: Path, root: Path) -> str:
         return str(path.relative_to(root))
     except ValueError:
         return str(path)
-
-
-def _size(path: Path) -> str:
-    """How big it is. A film is gigabytes; a sample or a trailer is not, and ``0.0 GB``
-    beside a real file reads like a fault."""
-    try:
-        size = path.stat().st_size
-    except OSError:  # pragma: no cover - it was there a moment ago
-        return ""
-    if size >= 1_000_000_000:
-        return f"{size / 1_000_000_000:.1f} GB"
-    return f"{size / 1_000_000:.0f} MB"
 
 
 # --- shared bits of typesetting ---------------------------------------------
