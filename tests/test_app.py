@@ -321,6 +321,21 @@ def test_a_mount_is_a_capability_like_any_other(tmp_path: Path) -> None:
     assert '<div id="browser"></div>' in text
 
 
+def test_a_mount_offers_a_quick_video_selector(tmp_path: Path) -> None:
+    (tmp_path / "Blade.Runner.1982.mkv").touch()
+    (tmp_path / "The.Matrix.1999.mp4").touch()
+    (tmp_path / "cover.jpg").touch()
+
+    text = client_for(library_root=tmp_path).get("/").text
+
+    assert 'id="library-file"' in text
+    assert "Blade.Runner.1982.mkv" in text
+    assert "The.Matrix.1999.mp4" in text
+    assert "cover.jpg" not in text
+    assert "Video containers:" in text
+    assert 'hx-post="/file"' in text
+
+
 def test_browsing_lists_the_way_down_and_the_films(tmp_path: Path) -> None:
     (tmp_path / "Ridley Scott").mkdir()
     (tmp_path / "poster.jpg").touch()

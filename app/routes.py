@@ -471,10 +471,27 @@ def create_router(services: Services) -> APIRouter:
 
     @router.get("/", response_class=HTMLResponse)
     async def index(request: Request) -> HTMLResponse:
+        root = services.library_root.resolve()
+        quick_files = []
+        if root.is_dir():
+            quick_files = [
+                {
+                    "path": path,
+                    "name": str(path.relative_to(root.resolve())),
+                    "size": library.human_size(path),
+                }
+                for path in library.find_videos(root)
+            ]
         return render(
             request,
             "index.html",
-            {"capabilities": services.capabilities(), "root": services.library_root, "step": 1},
+            {
+                "capabilities": services.capabilities(),
+                "root": root,
+                "quick_files": quick_files,
+                "video_suffixes": sorted(library.VIDEO_SUFFIXES),
+                "step": 1,
+            },
         )
 
     @router.post("/search", response_class=HTMLResponse)

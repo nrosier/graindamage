@@ -141,6 +141,11 @@ button:hover {
   filter: brightness(1.08);
 }
 
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .spinner {
   color: var(--muted);
   font-size: 0.85rem;
@@ -268,6 +273,48 @@ button.secondary {
   border: 1px solid var(--line);
   color: var(--text);
   font-weight: 500;
+}
+
+.file-picker {
+  margin: 1rem 0 0.9rem;
+  padding: 0.9rem;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.file-picker label {
+  display: block;
+  margin-bottom: 0.45rem;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.file-picker-controls {
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+}
+
+.file-picker select {
+  flex: 1 1 20rem;
+  min-width: 0;
+}
+
+.picker-help {
+  margin: 0.55rem 0 0;
+  font-size: 0.82rem;
+}
+
+@media (max-width: 38rem) {
+  .file-picker-controls {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .file-picker-controls button {
+    width: 100%;
+  }
 }
 
 button.copied {

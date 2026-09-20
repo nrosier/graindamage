@@ -41,6 +41,28 @@
       as the command-line version does it. Only {{ root }} is served, and a link pointing
       out of it is refused.
     </p>
+    <form class="file-picker" hx-post="/file" hx-target="#results" hx-indicator="#file-spinner">
+      <label for="library-file">Pick a video from {{ root }}</label>
+      <div class="file-picker-controls">
+        <select id="library-file" name="path" required {% if not quick_files %}disabled{% endif %}>
+          {% if quick_files %}
+            <option value="">Choose a file…</option>
+            {% for file in quick_files %}
+              <option value="{{ file.path }}">{{ file.name }}{% if file.size %} · {{ file.size }}{% endif %}</option>
+            {% endfor %}
+          {% else %}
+            <option value="">No video files found yet</option>
+          {% endif %}
+        </select>
+        <button type="submit" {% if not quick_files %}disabled{% endif %}>Read filename</button>
+      </div>
+      <p class="muted picker-help">
+        Video containers: {{ video_suffixes | join(", ") }}. The filename is used to
+        find the film, just like <code>graindamage /mnt/…</code>. Quick pick shows the
+        first 20 files within three directory levels; browse below for the full tree.
+      </p>
+      <span id="file-spinner" class="spinner" aria-hidden="true">reading…</span>
+    </form>
     <p class="row">
       <button
         type="button"
