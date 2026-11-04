@@ -3,6 +3,7 @@ name: docker
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -48,6 +49,8 @@ jobs:
           tags: |
             type=sha,format=short,prefix=
             type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
 
       # Single-arch build first: it can be loaded into the runner's daemon and
       # actually started, so a broken image never reaches the `latest` tag.
