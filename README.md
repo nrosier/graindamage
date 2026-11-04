@@ -660,8 +660,8 @@ test that needs a credential-shaped string can build it from parts at runtime, w
 keeps the scanner useful. History is a different matter — a published commit cannot be
 un-flagged any other way.
 
-**`docker.yml`** — builds the image and pushes it to Docker Hub as
-`<DOCKERHUB_USERNAME>/graindamage`:
+**`docker.yml`** — builds the image and pushes it to the GitHub Container Registry as
+`ghcr.io/<owner>/graindamage`, where `<owner>` is the GitHub user or org that owns the repo:
 
 | Trigger         | Behaviour                                            |
 | --------------- | ---------------------------------------------------- |
@@ -675,16 +675,10 @@ Tags come from `docker/metadata-action`: the 7-character commit SHA as the build
 started, and `/healthz` must answer `{"status": "ok"}` — so a broken build cannot take over
 the `latest` tag.
 
-Required repository secrets:
-
-| Secret               | Purpose                                                          |
-| -------------------- | ---------------------------------------------------------------- |
-| `DOCKERHUB_USERNAME` | Docker Hub account, also the image namespace                     |
-| `DOCKERHUB_TOKEN`    | Docker Hub access token (Read & Write), not the account password |
-
-Because the username is a secret, it appears masked as `***` in logs and job summaries. If
-you would rather read the real tags there, move it to a repository *variable* and swap
-`secrets.DOCKERHUB_USERNAME` for `vars.DOCKERHUB_USERNAME` in the workflow.
+No repository secrets are needed. The workflow logs in to `ghcr.io` with the built-in
+`GITHUB_TOKEN`, which the job is granted `packages: write` for. Newly created GHCR packages
+are private by default; to allow anonymous pulls, set the package visibility to public in
+the package settings on GitHub.
 
 ## Layout
 
