@@ -67,6 +67,7 @@ jobs:
           platforms: linux/amd64
           load: true
           tags: ${{ env.IMAGE_NAME }}:smoke
+          labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -83,6 +84,11 @@ jobs:
             exit 1
           fi
           cat healthz.json
+          revision=$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$IMAGE_NAME:smoke")
+          if [ "$revision" != "$GITHUB_SHA" ]; then
+            echo "::error::org.opencontainers.image.revision is '$revision', expected '$GITHUB_SHA'"
+            exit 1
+          fi
           docker rm -f smoke
 
       - name: Build and push
