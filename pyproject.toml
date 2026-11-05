@@ -1,6 +1,6 @@
 [project]
 name = "graindamage"
-version = "0.8.1"
+version = "0.9.0"
 description = "Grain-aware AV1 and x265 encoding advice from IMDb technical specs and your own source file"
 readme = "README.md"
 requires-python = ">=3.13"
