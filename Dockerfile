@@ -27,6 +27,7 @@ RUN uv pip install --no-cache --no-deps .
 
 # --- runtime stage ---
 FROM cgr.dev/chainguard/python:latest-dev AS runtime
+ARG REVISION
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -52,3 +53,5 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
 # The base image's own ENTRYPOINT runs python directly; clear it so CMD is the full command.
 ENTRYPOINT []
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
+
+LABEL org.opencontainers.image.revision=${REVISION}

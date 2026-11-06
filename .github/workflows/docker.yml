@@ -68,6 +68,8 @@ jobs:
           load: true
           tags: ${{ env.IMAGE_NAME }}:smoke
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            REVISION=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -101,6 +103,8 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           annotations: ${{ steps.meta.outputs.annotations }}
+          build-args: |
+            REVISION=${{ github.sha }}
           # Keeps the registry showing two real architectures instead of extra
           # unknown/unknown attestation entries.
           provenance: false
