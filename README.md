@@ -26,7 +26,7 @@ image. Python 3.13 · FastAPI · Jinja2 · HTMX.
 
 ## Status
 
-Built in milestones; all eight are done (v0.9.0).
+Built in milestones; all eight are done (v0.9.1).
 
 | # | Milestone                                                        | State |
 | - | ---------------------------------------------------------------- | ----- |
