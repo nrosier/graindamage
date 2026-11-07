@@ -1,0 +1,195 @@
+name: Security Scan
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  security-events: write
+  id-token: write
+
+jobs:
+  security-pipeline:
+    name: SBOM, Grype and Trivy scans
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Generate SBOM (Syft)
+        uses: anchore/sbom-action@v0.24.3
+        with:
+          path: "."
+          format: cyclonedx-json
+          output-file: sbom.cyclonedx.json
+          syft-version: v1.57.0
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Upload SBOM
+        if: always() && hashFiles('sbom.cyclonedx.json') != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: sbom-cyclonedx
+          path: sbom.cyclonedx.json
+
+      - name: Scan SBOM with Grype
+        id: grype-scan
+        if: always()
+        uses: anchore/scan-action@v7.4.2
+        with:
+          sbom: sbom.cyclonedx.json
+          output-format: sarif
+          output-file: grype-results.sarif
+          severity-cutoff: high
+          fail-build: false
+          grype-version: v0.121.2
+
+      - name: Upload Grype SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: grype-results.sarif
+          category: grype-engine
+
+      - name: Scan repository with Trivy
+        id: trivy-scan
+        if: always()
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: "."
+          format: sarif
+          output: trivy-results.sarif
+          scanners: vuln,secret,misconfig
+          severity: HIGH,CRITICAL
+          version: v0.76.2
+
+      - name: Upload Trivy SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy-engine
+
+      - name: Open or update security issue
+        if: always() && github.event_name == 'schedule'
+        uses: actions/github-script@v9
+        env:
+          TRIVY_SARIF: trivy-results.sarif
+          GRYPE_SARIF: ${{ steps.grype-scan.outputs.sarif || 'grype-results.sarif' }}
+        with:
+          script: |
+            const fs = require('fs');
+
+            const trivyPath = process.env.TRIVY_SARIF;
+            const grypePath = process.env.GRYPE_SARIF;
+
+            function loadSarif(path) {
+              if (!fs.existsSync(path)) {
+                core.warning(`SARIF file not found, treating as zero findings: ${path}`);
+                return null;
+              }
+              return JSON.parse(fs.readFileSync(path, 'utf8'));
+            }
+
+            // Counts results whose rule has security-severity >= 7.0 (High or Critical).
+            // Falls back to level === 'error' when no security-severity is present.
+            function countHighOrCritical(sarif) {
+              if (!sarif) return 0;
+              let count = 0;
+              for (const run of sarif.runs || []) {
+                const driverRules = (run.tool && run.tool.driver && run.tool.driver.rules) || [];
+                const rules = new Map(driverRules.map((r) => [r.id, r]));
+                for (const result of run.results || []) {
+                  const ruleId = result.ruleId ?? (result.rule && result.rule.id);
+                  const rule = rules.get(ruleId) || result.rule || {};
+                  const raw = rule.properties && rule.properties['security-severity'];
+                  const score = raw === undefined ? NaN : parseFloat(raw);
+                  const level = result.level ?? (rule.defaultConfiguration && rule.defaultConfiguration.level);
+                  const isHighOrCritical = Number.isFinite(score) ? score >= 7.0 : level === 'error';
+                  if (isHighOrCritical) count++;
+                }
+              }
+              return count;
+            }
+
+            const trivyCount = countHighOrCritical(loadSarif(trivyPath));
+            const grypeCount = countHighOrCritical(loadSarif(grypePath));
+            core.info(`High/Critical findings: trivy=${trivyCount} grype=${grypeCount}`);
+
+            if (trivyCount + grypeCount === 0) {
+              core.info('no High/Critical findings');
+              return;
+            }
+
+            const { owner, repo } = context.repo;
+            const today = new Date().toISOString().slice(0, 10);
+            const title = 'Automated Security Report: High/Critical vulnerabilities detected';
+            const titlePrefix = 'Automated Security Report';
+            const countsMarker = (t, g) => `<!-- security-counts: trivy=${t} grype=${g} -->`;
+            const body = [
+              `Scheduled security scan on ${today} found High or Critical findings.`,
+              '',
+              `- Trivy (vuln, secret, misconfig): ${trivyCount}`,
+              `- Grype (SBOM): ${grypeCount}`,
+              '',
+              `Details: ${context.serverUrl}/${owner}/${repo}/security/code-scanning`,
+              '',
+              countsMarker(trivyCount, grypeCount),
+            ].join('\n');
+
+            const openIssues = await github.paginate(github.rest.issues.listForRepo, {
+              owner,
+              repo,
+              state: 'open',
+              labels: 'security',
+              per_page: 100,
+            });
+            const existing = openIssues.filter(
+              (i) => !i.pull_request && i.title.startsWith(titlePrefix)
+            );
+
+            if (existing.length > 0) {
+              const issue = existing[0];
+              if (existing.length > 1) {
+                core.warning(`Multiple open issues match the title prefix; updating #${issue.number}`);
+              }
+              const previous = (issue.body || '').match(/<!-- security-counts: trivy=(\d+) grype=(\d+) -->/);
+              const changed = !previous
+                || Number(previous[1]) !== trivyCount
+                || Number(previous[2]) !== grypeCount;
+
+              await github.rest.issues.update({
+                owner,
+                repo,
+                issue_number: issue.number,
+                body,
+              });
+
+              if (changed) {
+                await github.rest.issues.createComment({
+                  owner,
+                  repo,
+                  issue_number: issue.number,
+                  body: `Finding counts changed on ${today}: Trivy ${trivyCount}, Grype ${grypeCount}.`,
+                });
+              }
+              core.info(`Updated issue #${issue.number}`);
+            } else {
+              const created = await github.rest.issues.create({
+                owner,
+                repo,
+                title,
+                body,
+                labels: ['security'],
+              });
+              core.info(`Created issue #${created.data.number}`);
+            }
