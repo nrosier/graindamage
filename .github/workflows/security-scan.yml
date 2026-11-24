@@ -43,7 +43,7 @@ jobs:
       - name: Scan SBOM with Grype
         id: grype-scan
         if: always()
-        uses: anchore/scan-action@v7.4.2
+        uses: anchore/scan-action@v7.4.3
         with:
           sbom: sbom.cyclonedx.json
           output-format: sarif
